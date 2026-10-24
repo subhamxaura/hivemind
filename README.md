@@ -1,5 +1,9 @@
 # HiveMind (MVP)
 
+<p align="center">
+  <img src="assets/hivemind_overview.jpg" alt="HiveMind Overview" width="100%" />
+</p>
+
 > **SAFETY NOTICE: STRICTLY READ-ONLY**
 > HiveMind is an offline, read-only incident investigation and remediation proposal tool.
 > It **never** connects to live Kubernetes clusters or cloud APIs, never applies or mutates infrastructure, and never executes arbitrary scripts or model output. All remediation proposals are unified diffs intended strictly for human review.
