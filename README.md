@@ -1,4 +1,4 @@
-# HiveMind (MVP)
+# HiveMind 
 
 <p align="center">
   <img src="assets/hivemind_overview.jpg" alt="HiveMind Overview" width="100%" />
