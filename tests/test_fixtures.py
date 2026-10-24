@@ -17,6 +17,9 @@ def test_fixture_incident_diagnosable():
     report = engine.analyze()
 
     assert report.status == AnalysisStatus.DIAGNOSED
+    assert report.inconclusive_reasons == []
+    assert len(report.telemetry_warnings) > 0
+    assert any("payment-db" in w for w in report.telemetry_warnings)
     assert len(report.ranked_candidates) >= 1
     top = report.ranked_candidates[0]
     assert top.candidate_id == "cause-change-chg-901"
@@ -27,6 +30,8 @@ def test_fixture_incident_diagnosable():
     assert report.proposal.operation == "ADJUST_RESOURCE_LIMITS"
     assert report.proposal.status == "NOT_APPLIED"
     assert report.proposal.all_policy_checks_passed is True
+    assert any("within configured policy bounds" in c.details for c in report.proposal.policy_checks)
+    assert not any("safe bounds" in c.details for c in report.proposal.policy_checks)
 
 
 def test_fixture_incident_inconclusive_missing_evidence():

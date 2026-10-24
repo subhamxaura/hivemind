@@ -95,6 +95,11 @@ def test_remediation_proposal_resource_adjustment():
     assert p.all_policy_checks_passed is True
     assert "-            memory: 256Mi" in p.diff
     assert "+            memory: 512Mi" in p.diff
+    bounds_check = next(c for c in p.policy_checks if c.check_name == "resource_bounds_check")
+    assert "within configured policy bounds" in bounds_check.details
+    assert "safe bounds" not in bounds_check.details
+    assert any("policy compliance does not guarantee operational safety" in a for a in p.assumptions_and_limitations)
+    assert any("512Mi" in e.summary for e in p.evidence_references)
 
 
 def test_policy_validator_rejects_forbidden_kind():
@@ -173,6 +178,7 @@ spec:
     assert all_passed is False
     bounds_check = next(c for c in checks if c.check_name == "resource_bounds_check")
     assert bounds_check.passed is False
+    assert "violates configured policy bounds" in bounds_check.details
 
 
 def test_policy_validator_rejects_hostpath_and_sysadmin():
@@ -297,3 +303,125 @@ spec:
     assert all_passed is False
     priv_check = next(c for c in checks if c.check_name == "privilege_escalation_guardrail")
     assert priv_check.passed is False
+
+
+def test_remediation_proposal_rejects_missing_or_empty_prior_memory_limit():
+    """Generator must not infer prior state or fall back to defaults when prior memory limit is missing."""
+    now = datetime.now(timezone.utc)
+    change = DeploymentChange(
+        change_id="chg-no-prev",
+        service="worker",
+        timestamp=now - timedelta(minutes=10),
+        change_type="resource_limit",
+        identifier="cfg-03",
+        prior_known_good_identifier="cfg-02",
+        details={"memory_limit": "256Mi"},  # previous_memory_limit deliberately omitted
+    )
+    signal = AnomalySignal(
+        signal_id="sig-oom-2",
+        service="worker",
+        timestamp=now - timedelta(minutes=5),
+        name="oom_killed",
+        value=1,
+        severity="critical",
+    )
+    incident = IncidentEvent(
+        schema_version=CURRENT_SCHEMA_VERSION,
+        incident_id="inc-prop-no-prev",
+        detection_timestamp=now,
+        environment="production",
+        affected_services=["worker"],
+        changes=[change],
+        signals=[signal],
+    )
+    engine = DeterministicCorrelationEngine(incident)
+    report = engine.analyze()
+    # Diagnosed, but cannot safely construct proposal without explicit prior value
+    assert report.proposal is None
+
+
+def test_remediation_proposal_rejects_malformed_or_identical_prior_memory_limit():
+    """Generator must reject malformed memory units or no-op identical memory values."""
+    now = datetime.now(timezone.utc)
+    # Case A: Identical values (256Mi -> 256Mi)
+    change_same = DeploymentChange(
+        change_id="chg-same",
+        service="worker",
+        timestamp=now - timedelta(minutes=10),
+        change_type="resource_limit",
+        identifier="cfg-same",
+        details={"memory_limit": "256Mi", "previous_memory_limit": "256Mi"},
+    )
+    signal = AnomalySignal(
+        signal_id="sig-oom-same",
+        service="worker",
+        timestamp=now - timedelta(minutes=5),
+        name="oom_killed",
+        value=1,
+        severity="critical",
+    )
+    incident_same = IncidentEvent(
+        schema_version=CURRENT_SCHEMA_VERSION,
+        incident_id="inc-prop-same",
+        detection_timestamp=now,
+        environment="production",
+        affected_services=["worker"],
+        changes=[change_same],
+        signals=[signal],
+    )
+    engine_same = DeterministicCorrelationEngine(incident_same)
+    assert engine_same.analyze().proposal is None
+
+    # Case B: Malformed unit
+    change_bad = DeploymentChange(
+        change_id="chg-bad",
+        service="worker",
+        timestamp=now - timedelta(minutes=10),
+        change_type="resource_limit",
+        identifier="cfg-bad",
+        details={"memory_limit": "256Mi", "previous_memory_limit": "512BogusUnit"},
+    )
+    incident_bad = IncidentEvent(
+        schema_version=CURRENT_SCHEMA_VERSION,
+        incident_id="inc-prop-bad",
+        detection_timestamp=now,
+        environment="production",
+        affected_services=["worker"],
+        changes=[change_bad],
+        signals=[signal],
+    )
+    engine_bad = DeterministicCorrelationEngine(incident_bad)
+    assert engine_bad.analyze().proposal is None
+
+
+def test_remediation_proposal_rejects_missing_or_identical_prior_revision():
+    """Rollback proposal must reject missing, empty, or self-referential revisions."""
+    now = datetime.now(timezone.utc)
+    change_self = DeploymentChange(
+        change_id="chg-self",
+        service="web",
+        timestamp=now - timedelta(minutes=10),
+        change_type="deployment",
+        identifier="v1.0.0",
+        prior_known_good_identifier="v1.0.0",  # Same as current
+        details={"image": "web:v1.0.0"},
+    )
+    signal = AnomalySignal(
+        signal_id="sig-web-err",
+        service="web",
+        timestamp=now - timedelta(minutes=5),
+        name="crash_loop",
+        value=1,
+        severity="critical",
+    )
+    incident = IncidentEvent(
+        schema_version=CURRENT_SCHEMA_VERSION,
+        incident_id="inc-prop-self",
+        detection_timestamp=now,
+        environment="production",
+        affected_services=["web"],
+        changes=[change_self],
+        signals=[signal],
+    )
+    engine = DeterministicCorrelationEngine(incident)
+    assert engine.analyze().proposal is None

@@ -190,3 +190,102 @@ def test_cascading_dependency_failure():
     assert dep_cand.evidence_score >= 0.70
     assert "critical_dependency_weight" in dep_cand.scoring_breakdown
     assert "temporal_precedence_bonus" in dep_cand.scoring_breakdown
+
+
+def test_diagnosed_status_separates_telemetry_warnings_from_inconclusive_reasons():
+    """Diagnosed incidents must leave inconclusive_reasons empty and record caveats in telemetry_warnings."""
+    base_time = datetime(2026, 10, 24, 15, 0, 0, tzinfo=timezone.utc)
+    change = DeploymentChange(
+        change_id="chg-mem",
+        service="billing-svc",
+        timestamp=base_time - timedelta(minutes=15),
+        change_type="resource_limit",
+        identifier="rev-12",
+        prior_known_good_identifier="rev-11",
+        details={"memory_limit": "128Mi", "previous_memory_limit": "512Mi"},
+    )
+    signal = AnomalySignal(
+        signal_id="sig-oom",
+        service="billing-svc",
+        timestamp=base_time - timedelta(minutes=10),
+        name="oom_killed",
+        value=1,
+        severity="critical",
+    )
+    log = LogExcerpt(
+        log_id="log-oom",
+        service="billing-svc",
+        timestamp=base_time - timedelta(minutes=9),
+        message="Fatal: process killed due to OOM",
+    )
+    unmonitored_dep = TopologyDependency(
+        source_service="billing-svc",
+        target_service="unmonitored-cache",
+        dependency_type="cache",
+        critical=False,
+    )
+
+    incident = IncidentEvent(
+        schema_version=CURRENT_SCHEMA_VERSION,
+        incident_id="inc-caveat-test",
+        detection_timestamp=base_time,
+        environment="prod",
+        affected_services=["billing-svc"],
+        signals=[signal],
+        changes=[change],
+        log_excerpts=[log],
+        dependencies=[unmonitored_dep],
+    )
+
+    engine = DeterministicCorrelationEngine(incident)
+    report = engine.analyze()
+
+    assert report.status == AnalysisStatus.DIAGNOSED
+    assert report.inconclusive_reasons == []
+    assert len(report.telemetry_warnings) == 1
+    assert "unmonitored-cache" in report.telemetry_warnings[0]
+
+
+def test_inconclusive_status_populates_inconclusive_reasons_and_clears_telemetry_warnings():
+    """Inconclusive incidents must aggregate audit failure reasons and keep telemetry_warnings empty."""
+    base_time = datetime(2026, 10, 24, 15, 0, 0, tzinfo=timezone.utc)
+    signal = AnomalySignal(
+        signal_id="sig-early",
+        service="cart-svc",
+        timestamp=base_time - timedelta(minutes=40),
+        name="http_5xx",
+        value=50,
+        severity="critical",
+    )
+    change = DeploymentChange(
+        change_id="chg-late",
+        service="cart-svc",
+        timestamp=base_time - timedelta(minutes=20),
+        change_type="deployment",
+        identifier="v2",
+    )
+    unmonitored_dep = TopologyDependency(
+        source_service="cart-svc",
+        target_service="catalog-db",
+        dependency_type="database",
+        critical=True,
+    )
+
+    incident = IncidentEvent(
+        schema_version=CURRENT_SCHEMA_VERSION,
+        incident_id="inc-inconclusive-audit",
+        detection_timestamp=base_time,
+        environment="prod",
+        affected_services=["cart-svc"],
+        signals=[signal],
+        changes=[change],
+        dependencies=[unmonitored_dep],
+    )
+
+    engine = DeterministicCorrelationEngine(incident)
+    report = engine.analyze()
+
+    assert report.status == AnalysisStatus.INCONCLUSIVE
+    assert report.telemetry_warnings == []
+    assert len(report.inconclusive_reasons) >= 1
+    assert any("catalog-db" in r for r in report.inconclusive_reasons)

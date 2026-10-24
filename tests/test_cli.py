@@ -19,6 +19,10 @@ def test_cli_analyze_diagnosable_text(tmp_path: Path):
     assert "Faulty Change on payment-service" in result.output
     assert "REMEDIATION PROPOSAL" in result.output
     assert "Execution Status: NOT_APPLIED" in result.output
+    assert "TELEMETRY WARNINGS & LIMITATIONS:" in result.output
+    assert "payment-db" in result.output
+    assert "INCONCLUSIVE AUDIT NOTES:" not in result.output
+    assert "within configured policy bounds" in result.output
 
 
 def test_cli_analyze_diagnosable_json(tmp_path: Path):
@@ -29,6 +33,9 @@ def test_cli_analyze_diagnosable_json(tmp_path: Path):
     parsed = json.loads(result.output)
     assert parsed["incident_id"] == "inc-20261024-001"
     assert parsed["status"] == "DIAGNOSED"
+    assert parsed["inconclusive_reasons"] == []
+    assert len(parsed["telemetry_warnings"]) > 0
+    assert any("payment-db" in w for w in parsed["telemetry_warnings"])
     assert parsed["proposal"]["status"] == "NOT_APPLIED"
 
 

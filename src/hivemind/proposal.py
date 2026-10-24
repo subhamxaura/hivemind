@@ -19,7 +19,7 @@ from hivemind.models import (
     RemediationProposal,
 )
 
-# Safe bounds for memory/cpu adjustments
+# Configured policy bounds for memory/cpu adjustments
 MIN_MEMORY_MB = 64
 MAX_MEMORY_MB = 4096
 
@@ -235,7 +235,7 @@ class DeterministicPolicyValidator:
                             PolicyCheckResult(
                                 check_name="resource_bounds_check",
                                 passed=True,
-                                details=f"Proposed memory limit ({mb}Mi) is within safe bounds [{MIN_MEMORY_MB}Mi, {MAX_MEMORY_MB}Mi].",
+                                details=f"Proposed memory limit ({mb}Mi) is within configured policy bounds [{MIN_MEMORY_MB}Mi, {MAX_MEMORY_MB}Mi].",
                             )
                         )
                     else:
@@ -243,7 +243,7 @@ class DeterministicPolicyValidator:
                             PolicyCheckResult(
                                 check_name="resource_bounds_check",
                                 passed=False,
-                                details=f"Proposed memory limit ({mb}Mi) violates safe bounds [{MIN_MEMORY_MB}Mi, {MAX_MEMORY_MB}Mi].",
+                                details=f"Proposed memory limit ({mb}Mi) violates configured policy bounds [{MIN_MEMORY_MB}Mi, {MAX_MEMORY_MB}Mi].",
                             )
                         )
                 else:
@@ -304,18 +304,50 @@ class RemediationProposalGenerator:
         rationale: str
         assumptions: list[str] = [
             "Proposal is an untrusted recommendation requiring human review and verification.",
-            "Proposal was validated against deterministic policy checks only.",
+            "Proposal was evaluated against deterministic static policy checks only; policy compliance does not guarantee operational safety.",
             "HiveMind did not connect to any cluster or mutate any live resource.",
         ]
 
-        # Case 1: Memory reduction causing OOMKilled -> Revert or increase memory limit
+        # Case 1: Memory adjustment (e.g. reduction causing OOMKilled) -> Revert to explicit prior known-good memory limit
         details = change.details
-        if "previous_memory_limit" in details and (
-            "memory" in details or "memory_limit" in details or change.change_type == "resource_limit"
-        ):
+        is_resource_change = (
+            change.change_type == "resource_limit"
+            or "previous_memory_limit" in details
+            or "memory_limit" in details
+            or "memory" in details
+        )
+
+        if is_resource_change:
+            raw_prev = details.get("previous_memory_limit")
+            raw_curr = details.get("memory_limit") or details.get("memory")
+            if not raw_prev or not raw_curr:
+                return None
+
+            raw_prev_str = str(raw_prev).strip()
+            raw_curr_str = str(raw_curr).strip()
+            if not raw_prev_str or not raw_curr_str:
+                return None
+
+            try:
+                prev_mb = _parse_memory_to_mb(raw_prev_str)
+                curr_mb = _parse_memory_to_mb(raw_curr_str)
+            except ValueError:
+                return None
+
+            if prev_mb == curr_mb:
+                return None
+
             operation = "ADJUST_RESOURCE_LIMITS"
-            prev_mem = details.get("previous_memory_limit", "512Mi")
-            curr_mem = details.get("memory_limit", details.get("memory", "256Mi"))
+            prev_mem = raw_prev_str
+            curr_mem = raw_curr_str
+
+            evidence_refs.append(
+                EvidenceReference(
+                    record_type="change",
+                    record_id=change.change_id,
+                    summary=f"Explicit prior known-good memory limit: {prev_mem}",
+                )
+            )
 
             before_manifest_dict = {
                 "apiVersion": "apps/v1",
@@ -328,7 +360,7 @@ class RemediationProposalGenerator:
                                 {
                                     "name": service,
                                     "resources": {
-                                        "limits": {"memory": str(curr_mem)},
+                                        "limits": {"memory": curr_mem},
                                         "requests": {"memory": "128Mi"},
                                     },
                                 }
@@ -348,7 +380,7 @@ class RemediationProposalGenerator:
                                 {
                                     "name": service,
                                     "resources": {
-                                        "limits": {"memory": str(prev_mem)},
+                                        "limits": {"memory": prev_mem},
                                         "requests": {"memory": "128Mi"},
                                     },
                                 }
@@ -358,15 +390,28 @@ class RemediationProposalGenerator:
                 },
             }
             rationale = (
-                f"Revert memory limit for {service} from {curr_mem} back to prior known-good "
+                f"Revert memory limit for {service} from {curr_mem} back to explicitly cited prior known-good "
                 f"value {prev_mem} to mitigate OOMKilled terminations."
             )
 
-        # Case 2: Code deployment causing crash/5xx -> Rollback to prior known good
-        elif change.prior_known_good_identifier:
+        # Case 2: Code deployment causing crash/5xx -> Rollback to explicit prior known-good revision
+        elif (
+            change.change_type == "deployment"
+            and change.prior_known_good_identifier
+            and change.prior_known_good_identifier.strip()
+            and change.prior_known_good_identifier.strip() != change.identifier.strip()
+        ):
             operation = "ROLLBACK_REVISION"
-            current_id = change.identifier
-            prior_id = change.prior_known_good_identifier
+            current_id = change.identifier.strip()
+            prior_id = change.prior_known_good_identifier.strip()
+
+            evidence_refs.append(
+                EvidenceReference(
+                    record_type="change",
+                    record_id=change.change_id,
+                    summary=f"Explicit prior known-good revision: {prior_id}",
+                )
+            )
 
             before_manifest_dict = {
                 "apiVersion": "apps/v1",
