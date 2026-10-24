@@ -204,12 +204,19 @@ spec:
 def test_memory_parsing_valid_and_malformed_fail_closed():
     # Valid units
     assert _parse_memory_to_mb("256Mi") == 256
+    assert _parse_memory_to_mb("256M") == 256
     assert _parse_memory_to_mb("1Gi") == 1024
     assert _parse_memory_to_mb("65536Ki") == 64
 
-    # Malformed units raise ValueError
+    # Malformed / unsupported units raise ValueError
     with pytest.raises(ValueError):
         _parse_memory_to_mb("256XYZ")
+
+    with pytest.raises(ValueError):
+        _parse_memory_to_mb("256m")  # 'm' is milli in Kubernetes, invalid for memory
+
+    with pytest.raises(ValueError):
+        _parse_memory_to_mb("256MB")  # Kubernetes rejects 'MB', requires 'M' or 'Mi'
 
     with pytest.raises(ValueError):
         _parse_memory_to_mb("-512Mi")
@@ -241,3 +248,52 @@ spec:
     assert all_passed is False
     bounds_check = next(c for c in checks if c.check_name == "resource_bounds_check")
     assert bounds_check.passed is False
+
+
+def test_structured_policy_checks_reject_mismatched_kind():
+    pod_manifest = """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker
+spec:
+  containers:
+  - name: worker
+    image: worker:v1
+"""
+    checks, all_passed = DeterministicPolicyValidator.validate(
+        operation="ROLLBACK_REVISION",
+        target_resource="apps/v1:Deployment/prod/worker",
+        before_manifest="kind: Deployment",
+        after_manifest=pod_manifest,
+        prior_known_good="v1",
+    )
+    assert all_passed is False
+    kind_check = next(c for c in checks if c.check_name == "target_resource_allowlist")
+    assert kind_check.passed is False
+
+
+def test_structured_policy_checks_reject_allow_privilege_escalation():
+    escalation_manifest = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        securityContext:
+          allowPrivilegeEscalation: true
+"""
+    checks, all_passed = DeterministicPolicyValidator.validate(
+        operation="ROLLBACK_REVISION",
+        target_resource="apps/v1:Deployment/prod/worker",
+        before_manifest="kind: Deployment",
+        after_manifest=escalation_manifest,
+        prior_known_good="v1",
+    )
+    assert all_passed is False
+    priv_check = next(c for c in checks if c.check_name == "privilege_escalation_guardrail")
+    assert priv_check.passed is False

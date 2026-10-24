@@ -25,19 +25,31 @@ MAX_MEMORY_MB = 4096
 
 
 def _parse_memory_to_mb(mem_str: str) -> int:
-    """Parses standard Kubernetes memory string (e.g. '256Mi', '1Gi') to megabytes."""
-    match = re.match(r"^(\d+)([A-Za-z]+)?$", str(mem_str).strip())
+    """Parses standard Kubernetes memory string (e.g. '256Mi', '1Gi') to megabytes.
+
+    Explicitly accepted units:
+    - 'Mi', 'M' (Megabytes)
+    - 'Gi', 'G' (Gigabytes)
+    - 'Ki', 'K', 'k' (Kilobytes)
+    - plain integer, 'B', 'b' (Bytes)
+    All other units (including 'm' milli, 'Ti', 's', negative, decimals) raise ValueError.
+    """
+    raw = str(mem_str).strip()
+    match = re.match(r"^(\d+)([A-Za-z]+)?$", raw)
     if not match:
         raise ValueError(f"Invalid memory format: {mem_str}")
-    val, unit = int(match.group(1)), (match.group(2) or "").lower()
-    if unit in ("mi", "m"):
+    val = int(match.group(1))
+    suffix = match.group(2) or ""
+
+    if suffix in ("Mi", "M"):
         return val
-    if unit in ("gi", "g"):
+    if suffix in ("Gi", "G"):
         return val * 1024
-    if unit in ("ki", "k"):
+    if suffix in ("Ki", "K", "k"):
         return val // 1024
-    if unit in ("", "b"):
+    if suffix in ("", "B", "b"):
         return val // (1024 * 1024)
+
     raise ValueError(f"Unsupported memory unit in: {mem_str}")
 
 
@@ -69,47 +81,18 @@ class DeterministicPolicyValidator:
         """Runs deterministic static checks on proposed manifests."""
         checks: list[PolicyCheckResult] = []
 
-        # 1. Target resource must be apps/v1:Deployment
-        if not target_resource.startswith("apps/v1:Deployment/"):
-            checks.append(
-                PolicyCheckResult(
-                    check_name="target_resource_allowlist",
-                    passed=False,
-                    details=f"Target '{target_resource}' is not in allowlist (only 'apps/v1:Deployment/*' allowed).",
-                )
-            )
-        else:
-            checks.append(
-                PolicyCheckResult(
-                    check_name="target_resource_allowlist",
-                    passed=True,
-                    details="Target resource is an allowed apps/v1 Deployment.",
-                )
-            )
-
-        # 2. Check for dangerous security escalation keywords in raw manifests
-        raw_after_lower = after_manifest.lower()
-        found_forbidden = [k for k in cls.FORBIDDEN_KEYS if k in raw_after_lower]
-        if found_forbidden:
-            checks.append(
-                PolicyCheckResult(
-                    check_name="privilege_escalation_guardrail",
-                    passed=False,
-                    details=f"Manifest contains forbidden security configurations: {', '.join(found_forbidden)}.",
-                )
-            )
-        else:
-            checks.append(
-                PolicyCheckResult(
-                    check_name="privilege_escalation_guardrail",
-                    passed=True,
-                    details="No privilege escalation or host access fields detected.",
-                )
-            )
-
-        # 3. Check parsed YAML validity
+        # 1. Parse and validate YAML syntax first
         try:
             after_obj = yaml.safe_load(after_manifest)
+            if not isinstance(after_obj, dict):
+                checks.append(
+                    PolicyCheckResult(
+                        check_name="valid_yaml_syntax",
+                        passed=False,
+                        details=f"Proposed manifest must be a YAML mapping, received {type(after_obj).__name__}.",
+                    )
+                )
+                return checks, False
             checks.append(
                 PolicyCheckResult(
                     check_name="valid_yaml_syntax",
@@ -126,6 +109,92 @@ class DeterministicPolicyValidator:
                 )
             )
             return checks, False
+
+        # 2. Target resource and manifest structure must strictly be apps/v1 Deployment
+        manifest_api = after_obj.get("apiVersion")
+        manifest_kind = after_obj.get("kind")
+
+        if (
+            not target_resource.startswith("apps/v1:Deployment/")
+            or manifest_api != "apps/v1"
+            or manifest_kind != "Deployment"
+        ):
+            checks.append(
+                PolicyCheckResult(
+                    check_name="target_resource_allowlist",
+                    passed=False,
+                    details=(
+                        f"Target resource or manifest kind rejected: target='{target_resource}', "
+                        f"apiVersion='{manifest_api}', kind='{manifest_kind}' (only 'apps/v1:Deployment' allowed)."
+                    ),
+                )
+            )
+        else:
+            checks.append(
+                PolicyCheckResult(
+                    check_name="target_resource_allowlist",
+                    passed=True,
+                    details="Target resource and manifest structure are confirmed apps/v1 Deployment.",
+                )
+            )
+
+        # 3. Structured security verification + keyword defense-in-depth
+        violations: list[str] = []
+
+        # Structured traversal of Deployment spec
+        pod_spec = after_obj.get("spec", {}).get("template", {}).get("spec", {})
+        if isinstance(pod_spec, dict):
+            if pod_spec.get("hostNetwork") is True:
+                violations.append("hostNetwork: true")
+            if pod_spec.get("hostPID") is True:
+                violations.append("hostPID: true")
+            if pod_spec.get("hostIPC") is True:
+                violations.append("hostIPC: true")
+
+            volumes = pod_spec.get("volumes", [])
+            if isinstance(volumes, list):
+                for vol in volumes:
+                    if isinstance(vol, dict) and "hostPath" in vol:
+                        violations.append("volumes contain hostPath mount")
+
+            containers = pod_spec.get("containers", [])
+            if isinstance(containers, list):
+                for ctr in containers:
+                    if isinstance(ctr, dict):
+                        sc = ctr.get("securityContext", {})
+                        if isinstance(sc, dict):
+                            if sc.get("privileged") is True:
+                                violations.append("container securityContext.privileged: true")
+                            if sc.get("allowPrivilegeEscalation") is True:
+                                violations.append("container securityContext.allowPrivilegeEscalation: true")
+                            caps = sc.get("capabilities", {})
+                            if isinstance(caps, dict):
+                                added = [str(c).upper() for c in caps.get("add", [])]
+                                if "SYS_ADMIN" in added or "ALL" in added:
+                                    violations.append(f"capabilities.add contains forbidden privilege: {added}")
+
+        # Text keyword defense-in-depth
+        raw_after_lower = after_manifest.lower()
+        found_forbidden = [k for k in cls.FORBIDDEN_KEYS if k in raw_after_lower]
+        if found_forbidden:
+            violations.append(f"forbidden keys in manifest text: {', '.join(found_forbidden)}")
+
+        if violations:
+            checks.append(
+                PolicyCheckResult(
+                    check_name="privilege_escalation_guardrail",
+                    passed=False,
+                    details=f"Manifest contains forbidden security configurations: {'; '.join(violations)}.",
+                )
+            )
+        else:
+            checks.append(
+                PolicyCheckResult(
+                    check_name="privilege_escalation_guardrail",
+                    passed=True,
+                    details="No privilege escalation or host access fields detected.",
+                )
+            )
 
         # 4. Rollback safety: Prior known-good revision required
         if operation == "ROLLBACK_REVISION":
