@@ -50,6 +50,16 @@ def test_cli_invalid_yaml(tmp_path: Path):
     assert "Incident validation failed" in result.output
 
 
+def test_cli_redacts_secret_in_malformed_file(tmp_path: Path):
+    bad_file = tmp_path / "bad_secret.yaml"
+    bad_file.write_text("broken_yaml: [unclosed password='my_super_secret_password_123'\n")
+    runner = CliRunner()
+    result = runner.invoke(main, ["analyze", str(bad_file)])
+    assert result.exit_code == 1
+    assert "my_super_secret_password_123" not in result.output
+    assert "[REDACTED]" in result.output
+
+
 def test_cli_missing_file():
     runner = CliRunner()
     result = runner.invoke(main, ["analyze", "non_existent_file.yaml"])

@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
 from hivemind.models import CURRENT_SCHEMA_VERSION, IncidentAnalysisReport, IncidentEvent
+from hivemind.redaction import redact_secrets
 
 app = FastAPI(
     title="HiveMind Incident Investigation API",
@@ -63,9 +64,10 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
         raw_text = body_bytes.decode("utf-8")
         parsed_data = yaml.safe_load(raw_text)
     except Exception as e:
+        safe_msg = redact_secrets(str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unable to parse request body as valid JSON/YAML: {e}",
+            detail=f"Unable to parse request body as valid JSON/YAML: {safe_msg}",
         )
 
     if not isinstance(parsed_data, dict):
@@ -79,7 +81,7 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
     except ValidationError as ve:
         # Non-sensitive error formatting
         error_details = [
-            {"field": " -> ".join(str(p) for p in err["loc"]), "message": err["msg"]}
+            {"field": " -> ".join(str(p) for p in err["loc"]), "message": redact_secrets(err["msg"])}
             for err in ve.errors()
         ]
         return JSONResponse(

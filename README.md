@@ -160,6 +160,7 @@ Evidence scores range from **0.0 to 1.0** and represent an additive weight:
 - **Dependency Cascading Base**: `+0.35` if a declared dependency reported an anomaly.
 - **Critical Dependency Weight**: `+0.25` if the dependency is flagged `critical: true`.
 - **Temporal Precedence**: `+0.20` if dependency failure preceded client service anomaly.
+- **Client Log Corroboration**: `+0.10` if client service logs reference downstream target service.
 - **Contradiction Penalties**:
   - `-0.40` if change occurred *after* the anomaly started.
   - `-0.35` if target dependency reported healthy status checks during the incident window.
@@ -180,7 +181,7 @@ Remediation proposals are generated **only** for diagnosed causes meeting safe c
 ### Mandatory Policy Check Guardrails:
 Every proposal passes through `DeterministicPolicyValidator`:
 - `target_resource_allowlist`: Enforces `apps/v1:Deployment` only. Rejects RBAC, DaemonSets, StatefulSets, Secrets, CRDs.
-- `privilege_escalation_guardrail`: Rejects manifests containing `privileged: true`, `hostNetwork: true`, `hostPID: true`, `hostIPC: true`, or `allowPrivilegeEscalation: true`.
+- `privilege_escalation_guardrail`: Rejects manifests containing `privileged: true`, `hostNetwork: true`, `hostPID: true`, `hostIPC: true`, `hostPath`, `SYS_ADMIN`, or `allowPrivilegeEscalation: true`.
 - `valid_yaml_syntax`: Ensures proposed output parses cleanly.
 - `explicit_rollback_target`: Verifies rollback target revision is provided.
 - `resource_bounds_check`: Enforces memory bounds.

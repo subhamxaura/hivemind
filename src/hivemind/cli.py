@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
 from hivemind.models import IncidentAnalysisReport, IncidentEvent
+from hivemind.redaction import redact_secrets
 
 
 def format_report_text(report: IncidentAnalysisReport) -> str:
@@ -126,10 +127,10 @@ def analyze_command(file_path: Path, output_format: str) -> None:
         click.echo("Error: Incident validation failed against schema contract:", err=True)
         for err in e.errors():
             loc = " -> ".join(str(p) for p in err["loc"])
-            click.echo(f"  - [{loc}]: {err['msg']}", err=True)
+            click.echo(f"  - [{loc}]: {redact_secrets(err['msg'])}", err=True)
         sys.exit(1)
     except Exception as e:
-        click.echo(f"Error reading incident file: {e}", err=True)
+        click.echo(f"Error reading incident file: {redact_secrets(str(e))}", err=True)
         sys.exit(1)
 
     try:
@@ -143,7 +144,7 @@ def analyze_command(file_path: Path, output_format: str) -> None:
 
         sys.exit(0)
     except Exception as e:
-        click.echo(f"Unexpected internal analysis error: {e}", err=True)
+        click.echo(f"Unexpected internal analysis error: {redact_secrets(str(e))}", err=True)
         sys.exit(2)
 
 

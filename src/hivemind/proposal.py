@@ -34,6 +34,8 @@ def _parse_memory_to_mb(mem_str: str) -> int:
         return val
     if unit in ("gi", "g"):
         return val * 1024
+    if unit in ("ki", "k"):
+        return val // 1024
     if unit in ("", "b"):
         return val // (1024 * 1024)
     raise ValueError(f"Unsupported memory unit in: {mem_str}")
@@ -47,6 +49,8 @@ class DeterministicPolicyValidator:
         "hostnetwork",
         "hostpid",
         "hostipc",
+        "hostpath",
+        "sys_admin",
         "allowprivilegeescalation",
         "clusterrole",
         "rolebinding",

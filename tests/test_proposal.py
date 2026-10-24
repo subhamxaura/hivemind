@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from hivemind.engine import DeterministicCorrelationEngine
 from hivemind.models import (
     CURRENT_SCHEMA_VERSION,
@@ -11,6 +13,7 @@ from hivemind.models import (
 )
 from hivemind.proposal import (
     DeterministicPolicyValidator,
+    _parse_memory_to_mb,
 )
 
 
@@ -166,6 +169,74 @@ spec:
         target_resource="apps/v1:Deployment/prod/worker",
         before_manifest="kind: Deployment",
         after_manifest=excessive_manifest,
+    )
+    assert all_passed is False
+    bounds_check = next(c for c in checks if c.check_name == "resource_bounds_check")
+    assert bounds_check.passed is False
+
+
+def test_policy_validator_rejects_hostpath_and_sysadmin():
+    hostpath_manifest = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  template:
+    spec:
+      volumes:
+      - name: host-root
+        hostPath:
+          path: /
+"""
+    checks, all_passed = DeterministicPolicyValidator.validate(
+        operation="ADJUST_RESOURCE_LIMITS",
+        target_resource="apps/v1:Deployment/prod/worker",
+        before_manifest="kind: Deployment",
+        after_manifest=hostpath_manifest,
+    )
+    assert all_passed is False
+    priv_check = next(c for c in checks if c.check_name == "privilege_escalation_guardrail")
+    assert priv_check.passed is False
+    assert "hostpath" in priv_check.details
+
+
+def test_memory_parsing_valid_and_malformed_fail_closed():
+    # Valid units
+    assert _parse_memory_to_mb("256Mi") == 256
+    assert _parse_memory_to_mb("1Gi") == 1024
+    assert _parse_memory_to_mb("65536Ki") == 64
+
+    # Malformed units raise ValueError
+    with pytest.raises(ValueError):
+        _parse_memory_to_mb("256XYZ")
+
+    with pytest.raises(ValueError):
+        _parse_memory_to_mb("-512Mi")
+
+    with pytest.raises(ValueError):
+        _parse_memory_to_mb("invalid")
+
+    # Verify that malformed unit in manifest causes policy check to fail closed
+    malformed_unit_manifest = """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  template:
+    spec:
+      containers:
+      - name: worker
+        resources:
+          limits:
+            memory: "512UnknownUnit"
+"""
+    checks, all_passed = DeterministicPolicyValidator.validate(
+        operation="ADJUST_RESOURCE_LIMITS",
+        target_resource="apps/v1:Deployment/prod/worker",
+        before_manifest="kind: Deployment",
+        after_manifest=malformed_unit_manifest,
     )
     assert all_passed is False
     bounds_check = next(c for c in checks if c.check_name == "resource_bounds_check")

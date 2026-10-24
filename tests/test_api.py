@@ -2,6 +2,7 @@
 
 import sys
 
+import yaml
 from fastapi.testclient import TestClient
 
 from hivemind.api import app
@@ -45,6 +46,33 @@ def test_analyze_endpoint_validation_failure():
     data = response.json()
     assert "error" in data
     assert "schema validation failed" in data["error"]
+
+
+def test_analyze_endpoint_json_success():
+    with open("fixtures/incident_diagnosable.yaml", "r", encoding="utf-8") as f:
+        fixture_data = yaml.safe_load(f.read())
+
+    response = client.post(
+        "/analyze",
+        json=fixture_data,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["incident_id"] == "inc-20261024-001"
+    assert data["status"] == "DIAGNOSED"
+
+
+def test_analyze_endpoint_redacts_secret_in_malformed_input():
+    malformed_yaml_with_secret = "invalid_yaml: [unclosed token='secret_token_12345_in_malformed_line'"
+    response = client.post(
+        "/analyze",
+        content=malformed_yaml_with_secret,
+        headers={"Content-Type": "application/x-yaml"},
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "secret_token_12345_in_malformed_line" not in detail
+    assert "[REDACTED]" in detail
 
 
 def test_no_mutating_routes_exist():

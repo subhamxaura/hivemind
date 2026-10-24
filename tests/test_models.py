@@ -166,3 +166,24 @@ def test_remediation_proposal_rejects_mutation_status():
             status="APPLIED_AUTOMATICALLY",  # Strictly forbidden
         )
     assert "HiveMind is read-only" in str(exc_info.value)
+
+
+def test_input_cannot_inject_proposal_or_status():
+    now = datetime.now(timezone.utc)
+    # Attempting to supply a proposal directly in the input must fail closed
+    with pytest.raises(ValidationError) as exc_info:
+        IncidentEvent.model_validate(
+            {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "incident_id": "inc-inject",
+                "detection_timestamp": now.isoformat(),
+                "environment": "prod",
+                "affected_services": ["api"],
+                "proposal": {
+                    "proposal_id": "fake",
+                    "operation": "ROLLBACK_REVISION",
+                    "status": "APPLIED",
+                },
+            }
+        )
+    assert "extra_forbidden" in str(exc_info.value)
