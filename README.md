@@ -166,17 +166,18 @@ Evidence scores range from **0.0 to 1.0** and represent an additive weight:
   - `-0.35` if target dependency reported healthy status checks during the incident window.
 
 ### Diagnosis vs. Inconclusive Status:
-- `DIAGNOSED`: Top candidate score $\ge 0.60$, with at least a $0.15$ score lead over any competing candidate, and zero unresolved contradictions.
-- `INCONCLUSIVE`: Top score $< 0.60$, or competing hypotheses within $0.15$, or unresolved contradictions, or missing vital telemetry.
+- `DIAGNOSED`: Top candidate score $\ge 0.60$, with at least a $0.15$ score lead over any competing candidate, and zero unresolved contradictions. Audit notes `inconclusive_reasons` are empty (`[]`); any non-fatal telemetry gaps (such as unmonitored downstream dependencies) are recorded in `telemetry_warnings`.
+- `INCONCLUSIVE`: Top score $< 0.60$, or competing hypotheses within $0.15$, or unresolved contradictions, or missing vital telemetry. Gaps and audit reasons are recorded in `inconclusive_reasons`.
 
 ---
 
 ## 6. Constrained Proposals & Policy Checks
 
-Remediation proposals are generated **only** for diagnosed causes meeting safe criteria:
+Remediation proposals are generated **only** for diagnosed causes meeting safe, explicit criteria:
 1. Target must be `apps/v1` `Deployment`.
-2. Rollback requires an explicit `prior_known_good_identifier`.
-3. Resource limits must fall within configured safe bounds (e.g., memory between 64Mi and 4Gi).
+2. Rollback requires an explicit, non-identical `prior_known_good_identifier` from input telemetry.
+3. Resource limit adjustments require explicit `previous_memory_limit` and current `memory_limit` in change details. HiveMind never infers historical values or applies default fallbacks.
+4. Proposed resource limits must fall within configured policy bounds (e.g., memory between 64Mi and 4Gi). Note that static policy compliance does not imply operational production safety.
 
 ### Mandatory Policy Check Guardrails:
 Every proposal passes through `DeterministicPolicyValidator`:
@@ -184,7 +185,7 @@ Every proposal passes through `DeterministicPolicyValidator`:
 - `privilege_escalation_guardrail`: Rejects manifests containing `privileged: true`, `hostNetwork: true`, `hostPID: true`, `hostIPC: true`, `hostPath`, `SYS_ADMIN`, or `allowPrivilegeEscalation: true`.
 - `valid_yaml_syntax`: Ensures proposed output parses cleanly.
 - `explicit_rollback_target`: Verifies rollback target revision is provided.
-- `resource_bounds_check`: Enforces memory bounds.
+- `resource_bounds_check`: Enforces configured policy bounds on memory limits.
 
 ---
 

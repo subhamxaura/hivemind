@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
-from hivemind.models import IncidentAnalysisReport, IncidentEvent
+from hivemind.models import AnalysisStatus, IncidentAnalysisReport, IncidentEvent
 from hivemind.redaction import redact_secrets
 
 
@@ -33,10 +33,15 @@ def format_report_text(report: IncidentAnalysisReport) -> str:
     lines.append(f" Summary      : {report.summary}")
     lines.append("-" * 78)
 
-    if report.inconclusive_reasons:
+    if report.status == AnalysisStatus.INCONCLUSIVE and report.inconclusive_reasons:
         lines.append(" INCONCLUSIVE AUDIT NOTES:")
         for reason in report.inconclusive_reasons:
             lines.append(f"   * {reason}")
+        lines.append("-" * 78)
+    elif report.status == AnalysisStatus.DIAGNOSED and report.telemetry_warnings:
+        lines.append(" TELEMETRY WARNINGS & LIMITATIONS:")
+        for warning in report.telemetry_warnings:
+            lines.append(f"   * {warning}")
         lines.append("-" * 78)
 
     lines.append(" RANKED CANDIDATE ROOT CAUSES:")

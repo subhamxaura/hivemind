@@ -64,20 +64,20 @@ class DeterministicCorrelationEngine:
 
         # 3. Assess missing telemetry/evidence across affected services
         missing_reasons = self._assess_missing_evidence()
-        inconclusive_reasons.extend(missing_reasons)
 
         # 4. Sort candidates by evidence score descending
         candidates.sort(key=lambda c: c.evidence_score, reverse=True)
 
         # 5. Determine overall diagnostic status and audit outcome
         status = AnalysisStatus.INCONCLUSIVE
+        failure_reasons: list[str] = []
         summary: str
 
         if not candidates:
-            inconclusive_reasons.append("No plausible candidate causes identified from provided evidence.")
+            failure_reasons.append("No plausible candidate causes identified from provided evidence.")
             summary = "Investigation yielded no strong candidate root cause due to absence of correlating events."
         elif candidates[0].evidence_score < DIAGNOSIS_SCORE_THRESHOLD:
-            inconclusive_reasons.append(
+            failure_reasons.append(
                 f"Top candidate '{candidates[0].title}' score ({candidates[0].evidence_score:.2f}) "
                 f"is below the deterministic threshold ({DIAGNOSIS_SCORE_THRESHOLD:.2f})."
             )
@@ -86,7 +86,7 @@ class DeterministicCorrelationEngine:
                 f"for candidate '{candidates[0].title}' lacks sufficient evidence."
             )
         elif len(candidates) > 1 and (candidates[0].evidence_score - candidates[1].evidence_score) < COMPETITIVE_MARGIN_THRESHOLD:
-            inconclusive_reasons.append(
+            failure_reasons.append(
                 f"Competing candidates '{candidates[0].title}' ({candidates[0].evidence_score:.2f}) and "
                 f"'{candidates[1].title}' ({candidates[1].evidence_score:.2f}) differ by less than "
                 f"margin threshold ({COMPETITIVE_MARGIN_THRESHOLD:.2f}); competing evidence cannot be resolved deterministically."
@@ -98,7 +98,7 @@ class DeterministicCorrelationEngine:
         else:
             top = candidates[0]
             if top.contradicting_evidence:
-                inconclusive_reasons.append(
+                failure_reasons.append(
                     f"Top candidate '{top.title}' has unresolved contradicting evidence records."
                 )
                 summary = (
@@ -111,6 +111,13 @@ class DeterministicCorrelationEngine:
                     f"Diagnosed with evidence score {top.evidence_score:.2f}: {top.title}. "
                     f"Supported by {len(top.supporting_evidence)} direct evidence citations."
                 )
+
+        if status == AnalysisStatus.DIAGNOSED:
+            inconclusive_reasons = []
+            telemetry_warnings = missing_reasons
+        else:
+            inconclusive_reasons = missing_reasons + failure_reasons
+            telemetry_warnings = []
 
         # 6. Generate proposal if diagnosed
         proposal = None
@@ -127,6 +134,7 @@ class DeterministicCorrelationEngine:
             ranked_candidates=candidates,
             proposal=proposal,
             inconclusive_reasons=inconclusive_reasons,
+            telemetry_warnings=telemetry_warnings,
         )
 
     def _evaluate_change_candidates(self) -> list[CandidateCause]:

@@ -258,6 +258,10 @@ class IncidentAnalysisReport(StrictBaseModel):
         default_factory=list,
         description="Explicit reasons if investigation yielded INCONCLUSIVE",
     )
+    telemetry_warnings: list[str] = Field(
+        default_factory=list,
+        description="Non-fatal telemetry gaps or warnings noted when status is DIAGNOSED",
+    )
     safety_notice: str = Field(
         default=(
             "HiveMind is strictly READ-ONLY. No changes were applied to any Kubernetes cluster "
