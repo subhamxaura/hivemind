@@ -1,0 +1,33 @@
+# HiveMind Sample Fixture 2: Inconclusive Incident (Missing Telemetry)
+# Pattern: High latency spike on checkout-service with no recorded deployment changes
+# and missing telemetry from declared downstream dependencies.
+schema_version: "hivemind.io/v1alpha1"
+incident_id: "inc-20261024-002"
+detection_timestamp: "2026-10-24T15:00:00Z"
+environment: "production"
+affected_services:
+  - "checkout-service"
+analysis_window_minutes: 60
+
+changes: []
+
+signals:
+  - signal_id: "sig-201"
+    service: "checkout-service"
+    timestamp: "2026-10-24T14:45:00Z"
+    name: "http_latency_p99_ms"
+    value: "4500"
+    threshold: "500"
+    severity: "critical"
+
+dependencies:
+  - source_service: "checkout-service"
+    target_service: "inventory-service"
+    dependency_type: "sync_http"
+    critical: true
+  - source_service: "checkout-service"
+    target_service: "payment-gateway"
+    dependency_type: "sync_http"
+    critical: true
+
+log_excerpts: []

@@ -1,0 +1,48 @@
+# HiveMind Sample Fixture 3: Contradictory Incident (Conflicting Telemetry)
+# Pattern: Errors on frontend-service with conflicting evidence:
+# 1. Change occurred AFTER errors had already started (temporal order violation).
+# 2. Downstream auth-service reports healthy 200 checks contradicting failure hypothesis.
+schema_version: "hivemind.io/v1alpha1"
+incident_id: "inc-20261024-003"
+detection_timestamp: "2026-10-24T16:00:00Z"
+environment: "production"
+affected_services:
+  - "frontend-service"
+analysis_window_minutes: 60
+
+changes:
+  - change_id: "chg-301"
+    service: "frontend-service"
+    timestamp: "2026-10-24T15:45:00Z"
+    change_type: "deployment"
+    identifier: "v2.1.4"
+    prior_known_good_identifier: "v2.1.3"
+    details:
+      image: "frontend:v2.1.4"
+
+signals:
+  - signal_id: "sig-301"
+    service: "frontend-service"
+    timestamp: "2026-10-24T15:20:00Z"
+    name: "http_5xx_rate"
+    value: "12.5"
+    threshold: "1.0"
+    severity: "critical"
+  - signal_id: "sig-302"
+    service: "auth-service"
+    timestamp: "2026-10-24T15:25:00Z"
+    name: "health_status"
+    value: "healthy"
+    severity: "info"
+
+dependencies:
+  - source_service: "frontend-service"
+    target_service: "auth-service"
+    dependency_type: "sync_http"
+    critical: true
+
+log_excerpts:
+  - log_id: "log-301"
+    service: "frontend-service"
+    timestamp: "2026-10-24T15:21:00Z"
+    message: "Client timeout communicating with auth-service token=secret_auth_token_value_abc123"

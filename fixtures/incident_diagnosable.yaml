@@ -1,0 +1,48 @@
+# HiveMind Sample Fixture 1: Diagnosable Incident
+# Pattern: Recent memory limit reduction causing OOMKilled crash on payment-service.
+schema_version: "hivemind.io/v1alpha1"
+incident_id: "inc-20261024-001"
+detection_timestamp: "2026-10-24T14:30:00Z"
+environment: "production"
+affected_services:
+  - "payment-service"
+analysis_window_minutes: 60
+
+changes:
+  - change_id: "chg-901"
+    service: "payment-service"
+    timestamp: "2026-10-24T14:10:00Z"
+    change_type: "resource_limit"
+    identifier: "rev-104"
+    prior_known_good_identifier: "rev-103"
+    details:
+      memory_limit: "256Mi"
+      previous_memory_limit: "512Mi"
+
+signals:
+  - signal_id: "sig-001"
+    service: "payment-service"
+    timestamp: "2026-10-24T14:18:00Z"
+    name: "oom_killed"
+    value: "1"
+    threshold: "0"
+    severity: "critical"
+  - signal_id: "sig-002"
+    service: "payment-service"
+    timestamp: "2026-10-24T14:22:00Z"
+    name: "pod_restart_count"
+    value: "5"
+    threshold: "1"
+    severity: "warning"
+
+dependencies:
+  - source_service: "payment-service"
+    target_service: "payment-db"
+    dependency_type: "database"
+    critical: true
+
+log_excerpts:
+  - log_id: "log-101"
+    service: "payment-service"
+    timestamp: "2026-10-24T14:18:05Z"
+    message: "Out of memory: Kill process 2819 (python) score 950 or sacrifice child"

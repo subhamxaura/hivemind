@@ -1,0 +1,7 @@
+.opencode/ralph-loop.local.md
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/

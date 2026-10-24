@@ -1,0 +1,2 @@
+[console_scripts]
+hivemind = hivemind.cli:main

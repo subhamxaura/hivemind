@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hivemind"
+version = "0.1.0"
+description = "Safety-first, read-only incident investigation and remediation proposal tool for Kubernetes"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "HiveMind Maintainers" }
+]
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "click>=8.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.25",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+hivemind = "hivemind.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["yaml", "yaml.*"]
+ignore_missing_imports = true
