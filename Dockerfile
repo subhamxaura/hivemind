@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12.15-slim-bookworm AS build
+FROM python:3.15.0-slim-bookworm AS build
 
 ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv "$VIRTUAL_ENV"
@@ -8,7 +8,7 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN "$VIRTUAL_ENV/bin/pip" install --no-cache-dir --no-compile .
 
-FROM python:3.12.15-slim-bookworm AS runtime
+FROM python:3.15.0-slim-bookworm AS runtime
 ARG VERSION=0.1.0
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
