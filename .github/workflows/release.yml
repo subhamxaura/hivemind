@@ -1,0 +1,149 @@
+name: Release
+
+"on":
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (leave empty to use ref)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-release:
+    name: Verify release readiness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_tag="${{ github.event.inputs.tag }}"
+          if [ -z "$raw_tag" ]; then
+            raw_tag="${GITHUB_REF_NAME}"
+          fi
+          # Strip leading 'v' if present
+          version="${raw_tag#v}"
+          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          echo "Comparing release version '$version' against package version '$package_version'"
+          if [ "$version" != "$package_version" ]; then
+            echo "::error::Tag version '$version' does not match pyproject.toml version '$package_version'!"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run lint and type checks
+        run: |
+          python -m ruff check src/ tests/
+          python -m mypy src/
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+  publish-release:
+    name: Publish container to GHCR
+    needs: verify-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Resolve release version and tags
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_tag="${{ github.event.inputs.tag }}"
+          if [ -z "$raw_tag" ]; then
+            raw_tag="${GITHUB_REF_NAME}"
+          fi
+          version="${raw_tag#v}"
+          short_sha="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          repo_lower="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${repo_lower}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@53851d14592bedcffcf25ea515637cff71ef929a # v3.3.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        id: build-push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.15.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.version }}
+            ${{ steps.vars.outputs.image }}:sha-${{ steps.vars.outputs.short_sha }}
+            ${{ steps.vars.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.title=HiveMind
+            org.opencontainers.image.description=Safety-first, read-only incident investigation and remediation proposal tool
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Verify published image manifest and digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ steps.vars.outputs.image }}"
+          version="${{ steps.vars.outputs.version }}"
+          digest="${{ steps.build-push.outputs.digest }}"
+          
+          echo "Published image digest: ${digest}"
+          
+          # Inspect manifest from GHCR
+          docker buildx imagetools inspect "${image}:${version}"
+          
+          echo "### GHCR Release Summary :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image Target:** \`${image}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version Tag:** \`${version}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit SHA Tag:** \`sha-${{ steps.vars.outputs.short_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Floating Tag:** \`latest\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Platforms:** \`linux/amd64\`, \`linux/arm64\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Provenance & SBOM:** Generated and attached" >> "$GITHUB_STEP_SUMMARY"

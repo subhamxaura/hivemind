@@ -96,6 +96,8 @@ services:
 networks:
   monitoring:
     driver: bridge
+    # internal: false allows Docker Desktop / host loopback port forwarding.
+    # All container ports bind exclusively to 127.0.0.1 on the host.
     internal: false
 
 volumes:
