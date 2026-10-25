@@ -22,9 +22,10 @@ HiveMind is architected as an offline, deterministic evaluation pipeline:
           │ Diagnosed / Inconclusive Report
           ▼
 ┌─────────────────────────┐
-│ Constrained Proposal &  │  --> Restricted to apps/v1 Deployment
-│ Deterministic Policies  │  --> Privilege escalation guardrails
-│                         │  --> Unified diff generation
+│ Constrained Proposal &  │  --> k8s_manifest: parse, identity, validation
+│ Deterministic Policies  │  --> security: privilege escalation guardrails
+│ (Split Modules)         │  --> policy: deterministic policy validator
+│                         │  --> proposal: diff & proposal generation
 └──────────┬──────────────┘
           │
           ├──> CLI (human-readable table/json, exit codes 0/1/2)
