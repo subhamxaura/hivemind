@@ -12,6 +12,8 @@ Strictly read-only: No mutation endpoints, cluster connections, or credentials.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from time import perf_counter
 from typing import Any
 
@@ -24,6 +26,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 
 from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
+from hivemind.logging_config import setup_logging
 from hivemind.models import CURRENT_SCHEMA_VERSION, IncidentAnalysisReport, IncidentEvent
 from hivemind.redaction import redact_secrets
 
@@ -53,6 +56,13 @@ PROPOSAL_GENERATION = Counter(
 _KNOWN_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
 _KNOWN_PATHS = frozenset({"/healthz", "/readyz", "/analyze"})
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Configure structured JSON logging on API startup."""
+    setup_logging(log_format="json")
+    yield
+
+
 app = FastAPI(
     title="HiveMind Incident Investigation API",
     description=(
@@ -60,6 +70,7 @@ app = FastAPI(
         "Strictly operates offline without cluster mutation capabilities."
     ),
     version=__version__,
+    lifespan=lifespan,
 )
 
 

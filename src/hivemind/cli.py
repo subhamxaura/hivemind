@@ -4,6 +4,7 @@ Provides human-reviewable terminal reports for incident telemetry and remediatio
 Strictly read-only: Never applies mutations to production.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
+from hivemind.logging_config import setup_logging
 from hivemind.models import AnalysisStatus, IncidentAnalysisReport, IncidentEvent
 from hivemind.redaction import redact_secrets
 
@@ -114,9 +116,16 @@ def format_report_text(report: IncidentAnalysisReport) -> str:
 
 @click.group()
 @click.version_option(version=__version__)
-def main() -> None:
+@click.option(
+    "--log-format",
+    type=click.Choice(["plain", "json"], case_sensitive=False),
+    default="plain",
+    help="Logging format: plain text or structured JSON.",
+)
+def main(log_format: str = "plain") -> None:
     """HiveMind: Safety-first incident investigation and remediation proposal tool."""
-    pass
+    level = logging.INFO if log_format == "json" else logging.WARNING
+    setup_logging(log_format=log_format, level=level)
 
 
 @main.command(name="analyze")
@@ -128,8 +137,17 @@ def main() -> None:
     default="text",
     help="Output format: text (terminal friendly) or json (machine readable).",
 )
-def analyze_command(file_path: Path, output_format: str) -> None:
+@click.option(
+    "--log-format",
+    type=click.Choice(["plain", "json"], case_sensitive=False),
+    default=None,
+    help="Logging format: plain text or structured JSON.",
+)
+def analyze_command(file_path: Path, output_format: str, log_format: str | None = None) -> None:
     """Analyze a structured incident YAML file and report ranked candidate root causes."""
+    if log_format is not None:
+        level = logging.INFO if log_format == "json" else logging.WARNING
+        setup_logging(log_format=log_format, level=level)
     try:
         content = file_path.read_text(encoding="utf-8")
         data = yaml.safe_load(content)
