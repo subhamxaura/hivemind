@@ -25,17 +25,34 @@ from pydantic import ValidationError
 from starlette.middleware.base import RequestResponseEndpoint
 
 from hivemind import __version__
+from hivemind.config import HiveMindConfig
 from hivemind.engine import DeterministicCorrelationEngine
 from hivemind.logging_config import setup_logging
 from hivemind.models import CURRENT_SCHEMA_VERSION, IncidentAnalysisReport, IncidentEvent
 from hivemind.redaction import redact_secrets
 
-MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MiB
-MAX_YAML_DEPTH = 20
-MAX_YAML_KEYS = 10_000
-ANALYSIS_CONCURRENCY = 4
+api_config = HiveMindConfig()
+MAX_REQUEST_BODY_BYTES = api_config.max_request_body_bytes
+MAX_YAML_DEPTH = api_config.max_yaml_depth
+MAX_YAML_KEYS = api_config.max_yaml_keys
+ANALYSIS_CONCURRENCY = api_config.analysis_concurrency
 
 analysis_semaphore = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Configure structured JSON logging and load configuration on API startup."""
+    global api_config, analysis_semaphore, MAX_REQUEST_BODY_BYTES, MAX_YAML_DEPTH, MAX_YAML_KEYS, ANALYSIS_CONCURRENCY
+    api_config = HiveMindConfig()
+    MAX_REQUEST_BODY_BYTES = api_config.max_request_body_bytes
+    MAX_YAML_DEPTH = api_config.max_yaml_depth
+    MAX_YAML_KEYS = api_config.max_yaml_keys
+    ANALYSIS_CONCURRENCY = api_config.analysis_concurrency
+    analysis_semaphore = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+    setup_logging(log_format="json")
+    yield
+
 
 HTTP_REQUESTS = Counter(
     "hivemind_http_requests",
@@ -55,13 +72,6 @@ PROPOSAL_GENERATION = Counter(
 )
 _KNOWN_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
 _KNOWN_PATHS = frozenset({"/healthz", "/readyz", "/analyze"})
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Configure structured JSON logging on API startup."""
-    setup_logging(log_format="json")
-    yield
-
 
 app = FastAPI(
     title="HiveMind Incident Investigation API",
@@ -166,10 +176,10 @@ def metrics() -> Response:
 async def analyze_incident(request: Request) -> IncidentAnalysisReport:
     """Accepts an incident payload (JSON or YAML) and returns deterministic correlation findings."""
     body_bytes = await request.body()
-    if len(body_bytes) > MAX_REQUEST_BODY_BYTES:
+    if len(body_bytes) > api_config.max_request_body_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"Request body exceeds maximum size of {MAX_REQUEST_BODY_BYTES} bytes.",
+            detail=f"Request body exceeds maximum size of {api_config.max_request_body_bytes} bytes.",
         )
     if not body_bytes:
         raise HTTPException(
@@ -189,7 +199,11 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
         )
 
     try:
-        _check_yaml_depth_and_keys(parsed_data)
+        _check_yaml_depth_and_keys(
+            parsed_data,
+            max_depth=api_config.max_yaml_depth,
+            max_keys=api_config.max_yaml_keys,
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -218,7 +232,7 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
             },
         )  # type: ignore[return-value]
 
-    engine = DeterministicCorrelationEngine(incident)
+    engine = DeterministicCorrelationEngine(incident, config=api_config)
     try:
         await asyncio.wait_for(analysis_semaphore.acquire(), timeout=0.1)
     except (asyncio.TimeoutError, TimeoutError):
