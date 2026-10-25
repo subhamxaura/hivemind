@@ -9,6 +9,9 @@ Provides read-only inspection endpoints:
 Strictly read-only: No mutation endpoints, cluster connections, or credentials.
 """
 
+from __future__ import annotations
+
+import asyncio
 from time import perf_counter
 from typing import Any
 
@@ -23,6 +26,13 @@ from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
 from hivemind.models import CURRENT_SCHEMA_VERSION, IncidentAnalysisReport, IncidentEvent
 from hivemind.redaction import redact_secrets
+
+MAX_REQUEST_BODY_BYTES = 1_048_576  # 1 MiB
+MAX_YAML_DEPTH = 20
+MAX_YAML_KEYS = 10_000
+ANALYSIS_CONCURRENCY = 4
+
+analysis_semaphore = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
 
 HTTP_REQUESTS = Counter(
     "hivemind_http_requests",
@@ -51,6 +61,37 @@ app = FastAPI(
     ),
     version=__version__,
 )
+
+
+def _check_yaml_depth_and_keys(
+    data: Any,
+    max_depth: int = MAX_YAML_DEPTH,
+    max_keys: int = MAX_YAML_KEYS,
+) -> None:
+    """Recursively validate that YAML data does not exceed nesting depth or key limits."""
+    total_keys = 0
+
+    def _traverse(node: Any, depth: int) -> None:
+        nonlocal total_keys
+        if depth > max_depth:
+            raise ValueError(f"YAML nesting depth exceeds maximum allowed depth of {max_depth}.")
+
+        if isinstance(node, dict):
+            total_keys += len(node)
+            if total_keys > max_keys:
+                raise ValueError(f"YAML total key count across mappings exceeds maximum allowed keys of {max_keys}.")
+            for key, val in node.items():
+                if isinstance(key, (dict, list)):
+                    _traverse(key, depth + 1)
+                if isinstance(val, (dict, list)):
+                    _traverse(val, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, (dict, list)):
+                    _traverse(item, depth + 1)
+
+    if isinstance(data, (dict, list)):
+        _traverse(data, 1)
 
 
 @app.middleware("http")
@@ -105,13 +146,20 @@ def metrics() -> Response:
     response_model=IncidentAnalysisReport,
     summary="Analyze Incident Telemetry",
     responses={
-        400: {"description": "Malformed JSON or YAML input"},
+        400: {"description": "Malformed JSON or YAML input, excessive depth, or key count"},
+        413: {"description": "Payload exceeds maximum allowed size"},
         422: {"description": "Validation failure against strict IncidentEvent schema"},
+        503: {"description": "Concurrency limit reached; service temporarily unavailable"},
     },
 )
 async def analyze_incident(request: Request) -> IncidentAnalysisReport:
     """Accepts an incident payload (JSON or YAML) and returns deterministic correlation findings."""
     body_bytes = await request.body()
+    if len(body_bytes) > MAX_REQUEST_BODY_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"Request body exceeds maximum size of {MAX_REQUEST_BODY_BYTES} bytes.",
+        )
     if not body_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -127,6 +175,14 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unable to parse request body as valid JSON/YAML: {safe_msg}",
+        )
+
+    try:
+        _check_yaml_depth_and_keys(parsed_data)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )
 
     if not isinstance(parsed_data, dict):
@@ -152,7 +208,19 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
         )  # type: ignore[return-value]
 
     engine = DeterministicCorrelationEngine(incident)
-    report = engine.analyze()
+    try:
+        await asyncio.wait_for(analysis_semaphore.acquire(), timeout=0.1)
+    except (asyncio.TimeoutError, TimeoutError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analysis service busy. Concurrency limit reached.",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        report = engine.analyze()
+    finally:
+        analysis_semaphore.release()
+
     PROPOSAL_GENERATION.labels(
         status=report.proposal_generation.status.value,
         reason_code=report.proposal_generation.reason_code.value,
