@@ -1,0 +1,38 @@
+name: Feature Request
+description: Propose an idea or enhancement for HiveMind
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an improvement for HiveMind!
+        Please note: HiveMind is strictly an offline, read-only incident investigation and remediation proposal tool. Features that introduce mutating cluster interactions or active connections to production clusters will be rejected by design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: Is your feature request related to a specific problem or analysis limitation?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you would like to see implemented.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or workarounds you considered.
+    validations:
+      required: false
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Safety Invariant Confirmation
+      options:
+        - label: I confirm this feature preserves the offline, read-only safety invariant of HiveMind and does not add cluster-mutating capabilities.
+          required: true
