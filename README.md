@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # HiveMind 
+=======
+# HiveMind
+>>>>>>> 446494d (feat: add production deployment and security hardening)
 
 <p align="center">
   <img src="assets/hivemind_overview.jpg" alt="HiveMind Overview" width="100%" />
@@ -20,7 +24,7 @@
 - Recognizes missing telemetry and yields an explicit `INCONCLUSIVE` status instead of hallucinating diagnoses.
 - Generates constrained, human-reviewable Kubernetes `apps/v1` `Deployment` remediation diffs (reverting memory limits or rolling back to an explicit prior known-good revision).
 - Runs deterministic static policy checks (blocking privilege escalation, host mounts, RBAC mutations, and unbounded values).
-- Provides a human-readable CLI (`hivemind analyze`) and local HTTP API (`GET /healthz`, `POST /analyze`).
+- Provides a human-readable CLI (`hivemind analyze`) and HTTP API (`GET /healthz`, `GET /readyz`, internal `GET /metrics`, `POST /analyze`).
 
 ### What it does NOT do:
 - It does **not** connect to Kubernetes clusters, cloud providers, or remote hosts.
@@ -125,6 +129,34 @@ changes:
     details:
       memory_limit: "256Mi"
       previous_memory_limit: "512Mi"
+      target_container: "payment-service"
+      current_manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: payment-service
+          namespace: production
+          annotations:
+            hivemind.io/revision: "rev-104"
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: payment-service
+          template:
+            metadata:
+              labels:
+                app: payment-service
+            spec:
+              containers:
+                - name: payment-service
+                  image: example.invalid/payment-service:rev-104
+                  resources:
+                    requests:
+                      memory: 128Mi
+                    limits:
+                      memory: 256Mi
+                      cpu: 500m
 
 signals:
   - signal_id: "sig-001"
@@ -185,11 +217,21 @@ Remediation proposals are generated **only** for diagnosed causes meeting safe, 
 
 ### Mandatory Policy Check Guardrails:
 Every proposal passes through `DeterministicPolicyValidator`:
-- `target_resource_allowlist`: Enforces `apps/v1:Deployment` only. Rejects RBAC, DaemonSets, StatefulSets, Secrets, CRDs.
-- `privilege_escalation_guardrail`: Rejects manifests containing `privileged: true`, `hostNetwork: true`, `hostPID: true`, `hostIPC: true`, `hostPath`, `SYS_ADMIN`, or `allowPrivilegeEscalation: true`.
-- `valid_yaml_syntax`: Ensures proposed output parses cleanly.
-- `explicit_rollback_target`: Verifies rollback target revision is provided.
-- `resource_bounds_check`: Enforces configured policy bounds on memory limits.
+- **No synthetic workload manifests**: Every proposal requires a complete `details.current_manifest` mapping. Missing or structurally incomplete input means no proposal is produced.
+- **Memory adjustment**: In addition to `current_manifest`, supply `target_container`, `memory_limit`, and `previous_memory_limit`. The named container's source-manifest memory limit must match `memory_limit`; HiveMind changes only that one memory-limit field and preserves the rest of the manifest.
+- **Deployment rollback**: Supply complete `current_manifest` and `previous_manifest` mappings. Both must identify the same Deployment, carry the `hivemind.io/revision` annotation matching the current and `prior_known_good_identifier` values respectively, and retain the same immutable Deployment selector. The prior manifest is used as supplied; HiveMind does not turn an identifier into an assumed image tag.
+- **Exact target binding**: The proposal target comes from the manifest's `apiVersion`, `kind`, `metadata.namespace`, and `metadata.name`, not from an assumed service-to-workload naming convention.
+- **Memory bounds**: The proposed value must be between 64Mi and 4096Mi. Binary and decimal Kubernetes quantity suffixes are compared as exact byte counts; unsupported quantities fail closed.
+- `deployment_structure`: Checks both source and proposed Deployment structure, including selector/template label consistency and named containers.
+- `target_resource_allowlist`: Requires the exact source and proposed identity to equal the requested `apps/v1:Deployment/<namespace>/<name>` target.
+- `privilege_escalation_guardrail`: Inspects parsed pod-spec fields, including regular, init, and ephemeral containers. Harmless text in annotations is not treated as a security setting.
+- `valid_yaml_syntax`: Parses both manifests and rejects duplicate YAML mapping keys.
+- `explicit_rollback_target` and `deployment_selector_unchanged`: Verify the current/prior revision stamps and immutable selector for rollback.
+- `explicit_memory_target_and_baseline`, `explicit_prior_memory_limit`, `bounded_memory_change`, and `resource_bounds_check`: Verify the named container, telemetry baseline, prior value, single-field diff, and configured bounds.
+
+If any required source state, identity, revision, or policy check is missing or inconsistent, HiveMind returns **no proposal**. A generated diff is still an advisory artifact: its input provenance is not independently authenticated, and policy compliance is not a guarantee of operational or admission-policy safety.
+
+Every analysis response also includes `proposal_generation`, even when `proposal` is `null`. Its stable status (`GENERATED`, `NOT_GENERATED`, or `NOT_ATTEMPTED`), reason code, safe operator message, failed policy-check names, and `telemetry_evidence_count` explain the result. Generated proposals cite the exact source change plus resolvable supporting signal/log records from the same service; invalid or stale citations fail closed. Standard-library structured log records expose the status, reason code, evidence count, failed-check count, and (for unexpected errors) exception type only—never the manifest, raw log content, or exception text. No external telemetry backend or network call is introduced.
 
 ---
 
@@ -200,7 +242,56 @@ Every proposal passes through `DeterministicPolicyValidator`:
 
 ---
 
-## 8. Verification & Test Commands
+## 8. Production Container, Deployment & Monitoring
+
+### Security boundary
+
+The API does not implement authentication. Its `/analyze` response contains analysis derived from the submitted incident, and `/metrics` shares the API listener on port 8000. Do not expose the API, Prometheus, or Grafana directly to the public internet. Put any externally reachable deployment behind your organization's authenticated gateway with TLS, rate limits, request-body limits, and network controls. Compose ports bind only to `127.0.0.1`, and its monitoring bridge is marked internal; the Kubernetes Service is `ClusterIP` and no public Ingress is included.
+
+### Docker and local monitoring stack
+
+Build the versioned image from the repository root:
+
+```bash
+docker build --build-arg VERSION=0.1.0 --tag hivemind:0.1.0 .
+```
+
+The multi-stage image uses the official `python:3.12.15-slim-bookworm` base, installs only the application runtime, runs as UID 10001, and includes a `/healthz` container health check. Compose additionally enables a read-only root filesystem and drops Linux capabilities. The base-image tag is versioned rather than `latest`; update it regularly and pin the approved image digest in environments that require immutable builds.
+
+Prepare the local Grafana secret file, set a unique strong password, then start the stack:
+
+```powershell
+Copy-Item deploy/.env.example deploy/.env
+# Edit deploy/.env and set GRAFANA_ADMIN_PASSWORD before starting the stack.
+docker compose --env-file deploy/.env -f deploy/compose.yaml up --build --detach
+```
+
+The API is at `http://127.0.0.1:8000`, Prometheus at `http://127.0.0.1:9090`, and Grafana at `http://127.0.0.1:3000`. Grafana uses the credentials in `deploy/.env`. That file is ignored by Git; for shared or production infrastructure, use your approved secret manager instead. `docker compose ... down` preserves the named Prometheus and Grafana volumes; `down --volumes` deletes their stored data.
+
+Prometheus scrapes the API every 15 seconds and retains up to 15 days or 5 GB in the sample Compose configuration. Its rules alert on missing scrapes, sustained 5xx responses, and proposal-engine internal errors. Grafana provisions a dashboard for request rate, p95 analysis latency, HTTP 5xx rate, and proposal outcomes. The rules evaluate locally but do not send notifications; connect them to your organization's Alertmanager or managed alert-routing service. Back up persistent metrics and dashboard data according to your retention requirements.
+
+As checked on 2026-10-25, the configuration uses Prometheus 3.13.5 LTS and Grafana 13.2.4. Recheck upstream security updates before each release: [Prometheus 3.13.5](https://github.com/prometheus/prometheus/releases/tag/v3.13.5), [Grafana 13.2.4](https://github.com/grafana/grafana/releases/tag/v13.2.4), and the [Docker Official Python image tags](https://hub.docker.com/_/python).
+
+### Kubernetes
+
+The GitHub Actions workflow validates the Compose configuration, builds and smoke-tests the hardened image, and publishes a multi-architecture image to GHCR only for a `v<version>` tag that matches `pyproject.toml`. The image tag omits the leading `v`. The checked-in manifest currently references `ghcr.io/subhamxaura/hivemind:0.1.0`; if GHCR keeps your package private, create an image pull secret in the `hivemind` namespace before deployment.
+
+After the image is available and the registry pull policy is configured, apply the base workload:
+
+```bash
+kubectl apply -f deploy/kubernetes/hivemind.yaml
+kubectl -n hivemind rollout status deployment/hivemind-api
+```
+
+The workload starts with two replicas, health/readiness probes, a disruption budget, resource requests/limits, a non-root UID, a read-only root filesystem, dropped capabilities, the `RuntimeDefault` seccomp profile, and no mounted service-account token. These CPU and memory values are starting assumptions, not validated capacity figures; use representative load tests and your cluster's policy before production rollout. Replace the version tag with the verified image digest where immutable deployment references are required.
+
+`deploy/kubernetes/networkpolicy.yaml` is an optional restrictive policy. It allows access from namespaces labeled `hivemind.io/allow-api-access: "true"` and from Prometheus pods in the `monitoring` namespace, while denying API egress. Apply it only after adjusting selectors and verifying that your CNI enforces NetworkPolicy and does not block health probes. `servicemonitor.yaml` and `prometheusrule.yaml` require the Prometheus Operator CRDs; their `release: prometheus` labels must match your operator's selectors.
+
+### Metrics privacy
+
+The request counter and latency histogram use only a fixed route set, a bounded HTTP method, and status code. Proposal outcomes use the model's bounded status and reason-code enums. Incident IDs, environment names, service names, telemetry text, and exception messages are never used as metric labels. `/metrics` is not an authentication boundary, so keep it reachable only through the trusted monitoring network.
+
+## 9. Verification & Test Commands
 
 Run the full automated test suite:
 ```bash
@@ -216,3 +307,8 @@ Run static type checking:
 ```bash
 python -m mypy src/
 ```
+
+The GitHub Actions workflow at `.github/workflows/ci.yml` runs tests (including proposal and deployment-config integration checks), Ruff, and mypy on Python 3.11 and 3.12. It validates Prometheus rules and Compose, builds and smoke-tests the production container on pushes and pull requests. A matching version tag additionally publishes the multi-architecture GHCR image with build provenance and an SBOM.
+
+
+The `.github/dependabot.yml` configuration checks Python packages, the Dockerfile, Docker Compose images, Kubernetes image tags, and GitHub Actions weekly. Review its update pull requests through the same CI checks before merging.

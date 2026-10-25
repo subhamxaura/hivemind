@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check src/ tests/
+
+      - name: Type check
+        run: python -m mypy src/
+
+      - name: Run proposal end-to-end tests
+        run: python -m pytest -q tests/test_proposal_integration.py
+
+      - name: Run unit and integration tests
+        run: python -m pytest -q
+
+  container-build:
+    name: Build and smoke-test container
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate Prometheus configuration and alert rules
+        run: |
+          docker run --rm --entrypoint=/bin/promtool \
+            --volume "$PWD/deploy/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.13.5 check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint=/bin/promtool \
+            --volume "$PWD/deploy/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v3.13.5 check rules /etc/prometheus/alerts.yml
+
+      - name: Validate Compose configuration
+        env:
+          GRAFANA_ADMIN_USER: ci
+          GRAFANA_ADMIN_PASSWORD: ci-only-not-a-secret
+        run: docker compose -f deploy/compose.yaml config --quiet
+
+      - name: Build production image
+        run: docker build --build-arg VERSION=0.1.0 --tag hivemind:ci .
+
+      - name: Set up Python for response verification
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Smoke-test hardened container and proposal flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name hivemind-ci-smoke \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --cap-drop=ALL --security-opt=no-new-privileges:true \
+            --publish 127.0.0.1:18000:8000 hivemind:ci
+          trap 'docker rm --force hivemind-ci-smoke >/dev/null 2>&1 || true' EXIT
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/readyz >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          curl --fail --silent --show-error \
+            --header 'Content-Type: application/x-yaml' \
+            --data-binary @fixtures/incident_diagnosable.yaml \
+            http://127.0.0.1:18000/analyze > /tmp/hivemind-report.json
+          python -c 'import json; report=json.load(open("/tmp/hivemind-report.json", encoding="utf-8")); assert report["proposal_generation"]["status"] == "GENERATED"; assert report["proposal"]["status"] == "NOT_APPLIED"'
+          curl --fail --silent http://127.0.0.1:18000/metrics | grep -q 'hivemind_proposal_generation_total.*reason_code="GENERATED"'
+
+  publish-container:
+    name: Publish versioned image to GHCR
+    needs: container-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python for version check
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "$version" = "$package_version"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish versioned multi-architecture image
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$version" \
+            --tag "$image:$version" \
+            --provenance=true --sbom=true --push .

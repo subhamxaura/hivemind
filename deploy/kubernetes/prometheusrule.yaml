@@ -1,0 +1,44 @@
+# Requires the Prometheus Operator PrometheusRule CRD; align labels with your Prometheus selector.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: hivemind-api
+  namespace: hivemind
+  labels:
+    release: prometheus
+    app.kubernetes.io/name: hivemind
+spec:
+  groups:
+    - name: hivemind-api
+      rules:
+        - alert: HiveMindApiScrapeMissing
+          expr: absent(up{namespace="hivemind", service="hivemind-api"}) or up{namespace="hivemind", service="hivemind-api"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: hivemind
+          annotations:
+            summary: HiveMind API metrics endpoint is unavailable
+            description: Prometheus cannot scrape the HiveMind API metrics endpoint for at least two minutes.
+
+        - alert: HiveMindHighServerErrorRate
+          expr: >-
+            sum(rate(hivemind_http_requests_total{namespace="hivemind",service="hivemind-api",status_code=~"5.."}[5m]))
+            / clamp_min(sum(rate(hivemind_http_requests_total{namespace="hivemind",service="hivemind-api"}[5m])), 0.001) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            service: hivemind
+          annotations:
+            summary: HiveMind server error rate is elevated
+            description: More than 5% of HiveMind requests returned 5xx responses for ten minutes.
+
+        - alert: HiveMindProposalInternalError
+          expr: increase(hivemind_proposal_generation_total{namespace="hivemind",service="hivemind-api",reason_code="INTERNAL_ERROR"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+            service: hivemind
+          annotations:
+            summary: HiveMind proposal generation encountered an internal error
+            description: At least one proposal-generation attempt ended with the safe INTERNAL_ERROR reason code in the last five minutes.

@@ -18,6 +18,34 @@ changes:
     details:
       memory_limit: "256Mi"
       previous_memory_limit: "512Mi"
+      target_container: "payment-service"
+      current_manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: payment-service
+          namespace: production
+          annotations:
+            hivemind.io/revision: "rev-104"
+        spec:
+          replicas: 3
+          selector:
+            matchLabels:
+              app: payment-service
+          template:
+            metadata:
+              labels:
+                app: payment-service
+            spec:
+              containers:
+                - name: payment-service
+                  image: example.invalid/payment-service:rev-104
+                  resources:
+                    requests:
+                      memory: 128Mi
+                    limits:
+                      memory: 256Mi
+                      cpu: 500m
 
 signals:
   - signal_id: "sig-001"

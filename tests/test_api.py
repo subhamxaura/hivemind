@@ -19,6 +19,32 @@ def test_healthz_endpoint():
     assert data["mutation_enabled"] is False
 
 
+def test_readyz_endpoint():
+    response = client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "ready": True, "read_only": True}
+
+
+def test_prometheus_metrics_use_bounded_labels_and_exclude_incident_data():
+    with open("fixtures/incident_diagnosable.yaml", "r", encoding="utf-8") as fixture:
+        incident = yaml.safe_load(fixture.read())
+    incident["incident_id"] = "sensitive-incident-id-must-not-be-a-metric-label"
+
+    analysis_response = client.post("/analyze", json=incident)
+    metrics_response = client.get("/metrics")
+
+    assert analysis_response.status_code == 200
+    assert metrics_response.status_code == 200
+    assert "text/plain" in metrics_response.headers["content-type"]
+    metrics_body = metrics_response.text
+    assert "hivemind_http_requests_total" in metrics_body
+    assert 'path="/analyze"' in metrics_body
+    assert 'path="unmatched"' not in metrics_body
+    assert "hivemind_proposal_generation_total" in metrics_body
+    assert 'reason_code="GENERATED"' in metrics_body
+    assert "sensitive-incident-id-must-not-be-a-metric-label" not in metrics_body
+
+
 def test_analyze_endpoint_success():
     with open("fixtures/incident_diagnosable.yaml", "r", encoding="utf-8") as f:
         fixture_content = f.read()
@@ -33,6 +59,8 @@ def test_analyze_endpoint_success():
     assert data["incident_id"] == "inc-20261024-001"
     assert data["status"] == "DIAGNOSED"
     assert data["proposal"]["status"] == "NOT_APPLIED"
+    assert data["proposal_generation"]["status"] == "GENERATED"
+    assert data["proposal_generation"]["telemetry_evidence_count"] == 3
     assert "READ-ONLY" in data["safety_notice"]
 
 

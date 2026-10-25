@@ -50,7 +50,12 @@ class DeploymentChange(StrictBaseModel):
     )
     details: dict[str, Any] = Field(
         default_factory=dict,
-        description="Structured change details (e.g. previous vs new memory, image, replica count)",
+        description=(
+            "Structured change details. Proposal generation additionally requires a complete "
+            "current_manifest; memory adjustments require target_container and explicit current/prior "
+            "memory limits, while deployment rollbacks require a complete previous_manifest with "
+            "matching hivemind.io/revision annotations."
+        ),
     )
 
     @field_validator("timestamp")
@@ -237,6 +242,43 @@ class AnalysisStatus(str, Enum):
     INCONCLUSIVE = "INCONCLUSIVE"
 
 
+class ProposalGenerationStatus(str, Enum):
+    GENERATED = "GENERATED"
+    NOT_GENERATED = "NOT_GENERATED"
+    NOT_ATTEMPTED = "NOT_ATTEMPTED"
+
+
+class ProposalGenerationReasonCode(str, Enum):
+    GENERATED = "GENERATED"
+    DIAGNOSIS_NOT_CONFIRMED = "DIAGNOSIS_NOT_CONFIRMED"
+    UNSUPPORTED_CAUSE = "UNSUPPORTED_CAUSE"
+    CHANGE_NOT_FOUND = "CHANGE_NOT_FOUND"
+    SOURCE_MANIFEST_MISSING = "SOURCE_MANIFEST_MISSING"
+    SOURCE_MANIFEST_INVALID = "SOURCE_MANIFEST_INVALID"
+    TARGET_IDENTITY_INVALID = "TARGET_IDENTITY_INVALID"
+    MEMORY_EVIDENCE_MISSING = "MEMORY_EVIDENCE_MISSING"
+    MEMORY_QUANTITY_INVALID = "MEMORY_QUANTITY_INVALID"
+    MEMORY_BASELINE_MISMATCH = "MEMORY_BASELINE_MISMATCH"
+    MEMORY_NO_OP = "MEMORY_NO_OP"
+    PRIOR_MANIFEST_MISSING = "PRIOR_MANIFEST_MISSING"
+    REVISION_MISMATCH = "REVISION_MISMATCH"
+    SELECTOR_MISMATCH = "SELECTOR_MISMATCH"
+    TELEMETRY_REFERENCE_INVALID = "TELEMETRY_REFERENCE_INVALID"
+    POLICY_REJECTED = "POLICY_REJECTED"
+    SERIALIZATION_FAILED = "SERIALIZATION_FAILED"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+class ProposalGenerationOutcome(StrictBaseModel):
+    """Safe summary explaining whether a remediation proposal was produced."""
+
+    status: ProposalGenerationStatus
+    reason_code: ProposalGenerationReasonCode
+    message: str
+    failed_policy_checks: list[str] = Field(default_factory=list)
+    telemetry_evidence_count: int = Field(default=0, ge=0)
+
+
 class IncidentAnalysisReport(StrictBaseModel):
     """Complete auditable incident investigation report."""
 
@@ -253,6 +295,14 @@ class IncidentAnalysisReport(StrictBaseModel):
     proposal: RemediationProposal | None = Field(
         default=None,
         description="Constrained remediation proposal if criteria met, else None",
+    )
+    proposal_generation: ProposalGenerationOutcome = Field(
+        default_factory=lambda: ProposalGenerationOutcome(
+            status=ProposalGenerationStatus.NOT_ATTEMPTED,
+            reason_code=ProposalGenerationReasonCode.DIAGNOSIS_NOT_CONFIRMED,
+            message="Proposal generation was not attempted.",
+        ),
+        description="Structured reason and telemetry-evidence summary for proposal generation",
     )
     inconclusive_reasons: list[str] = Field(
         default_factory=list,

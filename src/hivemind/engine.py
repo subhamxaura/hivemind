@@ -4,6 +4,7 @@ Auditable, rule-based correlation of telemetry signals, deployment changes,
 and topology dependencies without black-box inferences or network calls.
 """
 
+import logging
 from datetime import datetime, timedelta
 
 from hivemind.models import (
@@ -15,8 +16,13 @@ from hivemind.models import (
     IncidentAnalysisReport,
     IncidentEvent,
     LogExcerpt,
+    ProposalGenerationOutcome,
+    ProposalGenerationReasonCode,
+    ProposalGenerationStatus,
 )
 from hivemind.proposal import RemediationProposalGenerator
+
+logger = logging.getLogger(__name__)
 
 # Threshold above which a candidate may yield DIAGNOSED if not contested
 DIAGNOSIS_SCORE_THRESHOLD = 0.60
@@ -119,10 +125,28 @@ class DeterministicCorrelationEngine:
             inconclusive_reasons = missing_reasons + failure_reasons
             telemetry_warnings = []
 
-        # 6. Generate proposal if diagnosed
+        # 6. Generate a proposal only after diagnosis, while retaining a safe outcome either way.
         proposal = None
+        proposal_generation = ProposalGenerationOutcome(
+            status=ProposalGenerationStatus.NOT_ATTEMPTED,
+            reason_code=ProposalGenerationReasonCode.DIAGNOSIS_NOT_CONFIRMED,
+            message="Proposal generation was not attempted because the diagnosis was inconclusive.",
+        )
         if status == AnalysisStatus.DIAGNOSED and candidates:
-            proposal = RemediationProposalGenerator.generate(self.incident, candidates[0])
+            proposal, proposal_generation = RemediationProposalGenerator.generate_with_outcome(
+                self.incident,
+                candidates[0],
+            )
+        else:
+            logger.info(
+                "Proposal generation not attempted",
+                extra={
+                    "proposal_status": proposal_generation.status.value,
+                    "proposal_reason_code": proposal_generation.reason_code.value,
+                    "proposal_telemetry_evidence_count": 0,
+                    "proposal_failed_policy_check_count": 0,
+                },
+            )
 
         return IncidentAnalysisReport(
             incident_id=self.incident.incident_id,
@@ -133,6 +157,7 @@ class DeterministicCorrelationEngine:
             analysis_window_end=self.window_end,
             ranked_candidates=candidates,
             proposal=proposal,
+            proposal_generation=proposal_generation,
             inconclusive_reasons=inconclusive_reasons,
             telemetry_warnings=telemetry_warnings,
         )
@@ -225,7 +250,20 @@ class DeterministicCorrelationEngine:
             svc_logs = [entry for entry in self.window_logs if entry.service == change.service]
             for log in svc_logs:
                 msg_lower = log.message.lower()
-                if any(k in msg_lower for k in ["error", "exception", "fatal", "oom", "killed", "panic", "crash"]):
+                if any(
+                    k in msg_lower
+                    for k in [
+                        "error",
+                        "exception",
+                        "fatal",
+                        "oom",
+                        "kill",
+                        "killed",
+                        "out of memory",
+                        "panic",
+                        "crash",
+                    ]
+                ):
                     supporting.append(
                         EvidenceReference(
                             record_type="log",

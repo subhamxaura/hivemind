@@ -19,6 +19,10 @@ def test_cli_analyze_diagnosable_text(tmp_path: Path):
     assert "Faulty Change on payment-service" in result.output
     assert "REMEDIATION PROPOSAL" in result.output
     assert "Execution Status: NOT_APPLIED" in result.output
+    assert "Generation      : GENERATED (GENERATED)" in result.output
+    assert "Telemetry Evidence: 3 cited signal/log record(s)" in result.output
+    assert "[SIGNAL:sig-001]" in result.output
+    assert "[LOG:log-101]" in result.output
     assert "TELEMETRY WARNINGS & LIMITATIONS:" in result.output
     assert "payment-db" in result.output
     assert "INCONCLUSIVE AUDIT NOTES:" not in result.output
@@ -37,6 +41,12 @@ def test_cli_analyze_diagnosable_json(tmp_path: Path):
     assert len(parsed["telemetry_warnings"]) > 0
     assert any("payment-db" in w for w in parsed["telemetry_warnings"])
     assert parsed["proposal"]["status"] == "NOT_APPLIED"
+    assert parsed["proposal_generation"]["status"] == "GENERATED"
+    assert parsed["proposal_generation"]["telemetry_evidence_count"] == 3
+    assert {item["record_id"] for item in parsed["proposal"]["evidence_references"]} >= {
+        "sig-001",
+        "log-101",
+    }
 
 
 def test_cli_analyze_inconclusive(tmp_path: Path):

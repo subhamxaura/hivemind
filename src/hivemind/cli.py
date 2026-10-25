@@ -70,8 +70,13 @@ def format_report_text(report: IncidentAnalysisReport) -> str:
 
     lines.append("\n" + "-" * 78)
     lines.append(" REMEDIATION PROPOSAL (FOR HUMAN REVIEW ONLY):")
+    generation = report.proposal_generation
+    lines.append(f"   Generation      : {generation.status.value} ({generation.reason_code.value})")
+    lines.append(f"   Generation Note : {generation.message}")
+    if generation.failed_policy_checks:
+        lines.append(f"   Rejected Checks : {', '.join(generation.failed_policy_checks)}")
     if not report.proposal:
-        lines.append("   No remediation proposal generated (criteria not met or evidence insufficient).")
+        lines.append("   No remediation proposal generated.")
     else:
         p = report.proposal
         lines.append(f"   Proposal ID     : {p.proposal_id}")
@@ -79,6 +84,14 @@ def format_report_text(report: IncidentAnalysisReport) -> str:
         lines.append(f"   Operation       : {p.operation}")
         lines.append(f"   Execution Status: {p.status} (Mandatory Read-Only Invariant)")
         lines.append(f"   Rationale       : {p.rationale}")
+        lines.append(
+            f"   Telemetry Evidence: {generation.telemetry_evidence_count} cited signal/log record(s)"
+        )
+        lines.append("   Proposal Evidence References:")
+        for evidence in p.evidence_references:
+            lines.append(
+                f"      - [{evidence.record_type.upper()}:{evidence.record_id}] {evidence.summary}"
+            )
         lines.append("   Deterministic Policy Checks:")
         for check in p.policy_checks:
             verdict = "PASSED" if check.passed else "FAILED"

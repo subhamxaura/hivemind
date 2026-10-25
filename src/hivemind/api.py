@@ -1,23 +1,47 @@
 """Local REST API for HiveMind incident investigation.
 
 Provides read-only inspection endpoints:
-- GET /healthz
+- GET /healthz (liveness)
+- GET /readyz (readiness)
+- GET /metrics (trusted internal networks only)
 - POST /analyze
 
 Strictly read-only: No mutation endpoints, cluster connections, or credentials.
 """
 
+from time import perf_counter
 from typing import Any
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import ValidationError
+from starlette.middleware.base import RequestResponseEndpoint
 
 from hivemind import __version__
 from hivemind.engine import DeterministicCorrelationEngine
 from hivemind.models import CURRENT_SCHEMA_VERSION, IncidentAnalysisReport, IncidentEvent
 from hivemind.redaction import redact_secrets
+
+HTTP_REQUESTS = Counter(
+    "hivemind_http_requests",
+    "HTTP requests handled by HiveMind, excluding metric scrapes.",
+    ("method", "path", "status_code"),
+)
+HTTP_REQUEST_DURATION = Histogram(
+    "hivemind_http_request_duration_seconds",
+    "HTTP request duration in seconds, excluding metric scrapes.",
+    ("method", "path"),
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+PROPOSAL_GENERATION = Counter(
+    "hivemind_proposal_generation",
+    "Proposal generation outcomes by bounded status and reason code.",
+    ("status", "reason_code"),
+)
+_KNOWN_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
+_KNOWN_PATHS = frozenset({"/healthz", "/readyz", "/analyze"})
 
 app = FastAPI(
     title="HiveMind Incident Investigation API",
@@ -29,7 +53,30 @@ app = FastAPI(
 )
 
 
-@app.get("/healthz", summary="Liveness & Readiness Health Probe")
+@app.middleware("http")
+async def observe_http_request(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
+    """Record bounded request metrics without labels derived from incident input."""
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    method = request.method if request.method in _KNOWN_METHODS else "OTHER"
+    path = request.url.path if request.url.path in _KNOWN_PATHS else "unmatched"
+    started_at = perf_counter()
+    response_status = 500
+    try:
+        response = await call_next(request)
+        response_status = response.status_code
+        return response
+    finally:
+        labels = {"method": method, "path": path}
+        HTTP_REQUESTS.labels(**labels, status_code=str(response_status)).inc()
+        HTTP_REQUEST_DURATION.labels(**labels).observe(perf_counter() - started_at)
+
+
+@app.get("/healthz", summary="Liveness Health Probe")
 def healthz() -> dict[str, Any]:
     """Health check endpoint confirming service status and read-only operation."""
     return {
@@ -39,6 +86,18 @@ def healthz() -> dict[str, Any]:
         "version": __version__,
         "supported_schema_version": CURRENT_SCHEMA_VERSION,
     }
+
+
+@app.get("/readyz", summary="Readiness Probe")
+def readyz() -> dict[str, bool | str]:
+    """Report readiness; the API is stateless and has no external dependency checks."""
+    return {"status": "ready", "ready": True, "read_only": True}
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Expose Prometheus metrics; keep this endpoint on a trusted internal network."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post(
@@ -94,4 +153,8 @@ async def analyze_incident(request: Request) -> IncidentAnalysisReport:
 
     engine = DeterministicCorrelationEngine(incident)
     report = engine.analyze()
+    PROPOSAL_GENERATION.labels(
+        status=report.proposal_generation.status.value,
+        reason_code=report.proposal_generation.reason_code.value,
+    ).inc()
     return report

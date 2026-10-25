@@ -10,6 +10,8 @@ from hivemind.models import (
     DeploymentChange,
     IncidentEvent,
     LogExcerpt,
+    ProposalGenerationReasonCode,
+    ProposalGenerationStatus,
     TopologyDependency,
 )
 
@@ -289,3 +291,5 @@ def test_inconclusive_status_populates_inconclusive_reasons_and_clears_telemetry
     assert report.telemetry_warnings == []
     assert len(report.inconclusive_reasons) >= 1
     assert any("catalog-db" in r for r in report.inconclusive_reasons)
+    assert report.proposal_generation.status == ProposalGenerationStatus.NOT_ATTEMPTED
+    assert report.proposal_generation.reason_code == ProposalGenerationReasonCode.DIAGNOSIS_NOT_CONFIRMED

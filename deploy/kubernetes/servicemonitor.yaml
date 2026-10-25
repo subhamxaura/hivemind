@@ -1,0 +1,22 @@
+# Requires the Prometheus Operator ServiceMonitor CRD.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: hivemind-api
+  namespace: hivemind
+  labels:
+    release: prometheus
+    app.kubernetes.io/name: hivemind
+spec:
+  namespaceSelector:
+    matchNames:
+      - hivemind
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hivemind
+      app.kubernetes.io/component: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 5s
