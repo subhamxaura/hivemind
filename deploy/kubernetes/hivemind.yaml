@@ -63,6 +63,8 @@ spec:
               app.kubernetes.io/component: api
       containers:
         - name: api
+          # Immutable multi-arch image digest for v0.1.0:
+          # image: ghcr.io/subhamxaura/hivemind@sha256:c50dac3a5d3f8f6bef1c35153946e2d0cc98831d36a796d845db7e898ede5f71
           image: ghcr.io/subhamxaura/hivemind:0.1.0
           imagePullPolicy: IfNotPresent
           ports:

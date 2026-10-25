@@ -364,3 +364,7 @@ Image publication is decoupled from pull-request verification and managed via `.
    ```bash
    docker pull ghcr.io/subhamxaura/hivemind:0.1.0
    ```
+Verified Release v0.1.0 Multi-Architecture Image Digest:
+```text
+ghcr.io/subhamxaura/hivemind@sha256:c50dac3a5d3f8f6bef1c35153946e2d0cc98831d36a796d845db7e898ede5f71
+```
