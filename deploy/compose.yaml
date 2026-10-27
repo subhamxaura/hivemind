@@ -35,7 +35,7 @@ services:
       - monitoring
 
   prometheus:
-    image: prom/prometheus:v3.13.5
+    image: prom/prometheus:v3.15.1
     restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
