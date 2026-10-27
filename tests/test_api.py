@@ -1,6 +1,7 @@
 """Tests for HiveMind FastAPI application and read-only endpoints."""
 
 import sys
+from typing import Any
 
 import yaml
 from fastapi.testclient import TestClient
@@ -130,3 +131,57 @@ def test_no_cluster_client_imported():
     ]
     for client_name in disallowed_clients:
         assert client_name not in loaded_modules
+
+
+def test_api_rejects_oversized_body():
+    large_payload = b"x" * int(1.5 * 1024 * 1024)
+    response = client.post(
+        "/analyze",
+        content=large_payload,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert response.status_code == 413
+    assert "exceeds maximum size" in response.json()["detail"]
+
+
+def test_api_rejects_deeply_nested_yaml():
+    curr: dict[str, Any] = {"leaf": "value"}
+    for i in range(24):
+        curr = {f"k{i}": curr}
+    deep_yaml = yaml.safe_dump(curr)
+    response = client.post(
+        "/analyze",
+        content=deep_yaml,
+        headers={"Content-Type": "application/x-yaml"},
+    )
+    assert response.status_code == 400
+    assert "nesting depth exceeds" in response.json()["detail"]
+
+
+def test_api_rejects_excessively_large_yaml_structure():
+    large_mapping = {f"key_{i}": i for i in range(15_000)}
+    large_yaml = yaml.safe_dump(large_mapping)
+    response = client.post(
+        "/analyze",
+        content=large_yaml,
+        headers={"Content-Type": "application/x-yaml"},
+    )
+    assert response.status_code == 400
+    assert "total key count" in response.json()["detail"]
+
+
+def test_api_concurrency_limit_exceeded(monkeypatch):
+    import asyncio
+
+    from hivemind import api
+
+    saturated_semaphore = asyncio.Semaphore(0)
+    monkeypatch.setattr(api, "analysis_semaphore", saturated_semaphore)
+
+    with open("fixtures/incident_diagnosable.yaml", "r", encoding="utf-8") as f:
+        fixture_data = yaml.safe_load(f.read())
+
+    response = client.post("/analyze", json=fixture_data)
+    assert response.status_code == 503
+    assert response.headers.get("Retry-After") == "1"
+    assert "Concurrency limit reached" in response.json()["detail"]

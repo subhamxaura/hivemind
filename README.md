@@ -73,6 +73,32 @@ Inspect an incident with contradictory evidence:
 hivemind analyze fixtures/incident_contradictory_evidence.yaml
 ```
 
+Analyze and write report directly to an output directory:
+```bash
+hivemind analyze fixtures/incident_diagnosable.yaml --output-dir reports/
+```
+
+Batch analyze all incident files in a directory:
+```bash
+hivemind batch fixtures/
+```
+
+Disable terminal color formatting:
+```bash
+hivemind analyze fixtures/incident_diagnosable.yaml --no-color
+# Or set the standard NO_COLOR environment variable:
+NO_COLOR=1 hivemind batch fixtures/
+```
+
+### Configuration:
+HiveMind supports environment-based configuration prefixed with `HIVEMIND_`:
+- `HIVEMIND_DIAGNOSIS_SCORE_THRESHOLD`: Score required for DIAGNOSED status (default: `0.60`)
+- `HIVEMIND_COMPETITIVE_MARGIN_THRESHOLD`: Margin required over second candidate (default: `0.15`)
+- `HIVEMIND_MAX_REQUEST_BODY_BYTES`: API maximum body size in bytes (default: `1048576`)
+- `HIVEMIND_MAX_YAML_DEPTH`: API YAML max nesting depth (default: `20`)
+- `HIVEMIND_MAX_YAML_KEYS`: API YAML max total mapping keys (default: `10000`)
+- `HIVEMIND_ANALYSIS_CONCURRENCY`: Max concurrent /analyze requests (default: `4`)
+
 ### Local API Usage:
 Start the local FastAPI server:
 ```bash
@@ -364,3 +390,7 @@ Image publication is decoupled from pull-request verification and managed via `.
    ```bash
    docker pull ghcr.io/subhamxaura/hivemind:0.1.0
    ```
+Verified Release v0.1.0 Multi-Architecture Image Digest:
+```text
+ghcr.io/subhamxaura/hivemind@sha256:c50dac3a5d3f8f6bef1c35153946e2d0cc98831d36a796d845db7e898ede5f71
+```

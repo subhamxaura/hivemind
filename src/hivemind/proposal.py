@@ -9,568 +9,63 @@ from __future__ import annotations
 import copy
 import difflib
 import logging
-import re
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
 
 import yaml
-from yaml.constructor import ConstructorError
-from yaml.nodes import MappingNode
 
+from hivemind.k8s_manifest import (
+    _find_container,
+    _get_memory_limit,
+    _manifest_identity,
+    _parse_manifest,
+    _parse_memory_to_bytes,
+    _resource_reference,
+    _revision,
+    _set_memory_limit,
+    _UniqueKeySafeLoader,
+    _valid_dns_name,
+    _validate_deployment_structure,
+)
 from hivemind.models import (
     CandidateCause,
     DeploymentChange,
     EvidenceReference,
     IncidentEvent,
-    PolicyCheckResult,
     ProposalGenerationOutcome,
     ProposalGenerationReasonCode,
     ProposalGenerationStatus,
     RemediationProposal,
 )
+from hivemind.policy import (
+    DeterministicPolicyValidator,
+    _only_target_memory_limit_changed,
+    _ProposalPolicyFailure,
+)
+from hivemind.security import _security_violations
 
-MIB = 1024 * 1024
-MIN_MEMORY_BYTES = 64 * MIB
-MAX_MEMORY_BYTES = 4096 * MIB
-REVISION_ANNOTATION = "hivemind.io/revision"
-ALLOWED_OPERATIONS = {"ROLLBACK_REVISION", "ADJUST_RESOURCE_LIMITS"}
 logger = logging.getLogger(__name__)
 
-
-class _ProposalPolicyFailure(Exception):
-    """Internal signal carrying only safe policy-check identifiers."""
-
-    def __init__(self, failed_checks: list[str]) -> None:
-        super().__init__("Proposal rejected by deterministic policy checks")
-        self.failed_checks = failed_checks
-
-
-class _UniqueKeySafeLoader(yaml.SafeLoader):
-    """Safe YAML loader that rejects duplicate mapping keys instead of hiding data."""
-
-
-def _construct_unique_mapping(
-    loader: _UniqueKeySafeLoader,
-    node: MappingNode,
-    deep: bool = False,
-) -> dict[Any, Any]:
-    loader.flatten_mapping(node)
-    result: dict[Any, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in result
-        except TypeError as exc:
-            raise ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "found an unhashable mapping key",
-                key_node.start_mark,
-            ) from exc
-        if duplicate:
-            raise ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r}",
-                key_node.start_mark,
-            )
-        result[key] = loader.construct_object(value_node, deep=deep)
-    return result
-
-
-_UniqueKeySafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
-
-
-def _parse_memory_to_bytes(memory: Any) -> int:
-    """Parse a conservative subset of Kubernetes memory quantities into exact bytes.
-
-    Accepted suffixes are binary Ki/Mi/Gi/Ti/Pi/Ei, decimal k/K/M/G/T/P/E,
-    and B/b. A suffix-free integer is interpreted as bytes. Unsupported,
-    fractional, negative, boolean, or non-integral forms fail closed.
-    """
-    if isinstance(memory, bool):
-        raise ValueError("Boolean values are not valid memory quantities")
-    raw = str(memory).strip()
-    match = re.fullmatch(r"(\d+)(Ki|Mi|Gi|Ti|Pi|Ei|k|K|M|G|T|P|E|B|b)?", raw)
-    if not match:
-        raise ValueError(f"Invalid or unsupported Kubernetes memory quantity: {memory!r}")
-
-    value = int(match.group(1))
-    suffix = match.group(2) or ""
-    multipliers = {
-        "": 1,
-        "B": 1,
-        "b": 1,
-        "k": 1000,
-        "K": 1000,
-        "M": 1000**2,
-        "G": 1000**3,
-        "T": 1000**4,
-        "P": 1000**5,
-        "E": 1000**6,
-        "Ki": 1024,
-        "Mi": 1024**2,
-        "Gi": 1024**3,
-        "Ti": 1024**4,
-        "Pi": 1024**5,
-        "Ei": 1024**6,
-    }
-    return value * multipliers[suffix]
-
-
-def _manifest_identity(manifest: Mapping[str, Any]) -> tuple[str, str] | None:
-    if manifest.get("apiVersion") != "apps/v1" or manifest.get("kind") != "Deployment":
-        return None
-    metadata = manifest.get("metadata")
-    if not isinstance(metadata, Mapping):
-        return None
-    name = metadata.get("name")
-    namespace = metadata.get("namespace")
-    if not isinstance(name, str) or not _valid_dns_name(name, allow_dots=True, max_length=253):
-        return None
-    if not isinstance(namespace, str) or not _valid_dns_name(namespace, allow_dots=False, max_length=63):
-        return None
-    return namespace, name
-
-
-def _valid_dns_name(value: str, *, allow_dots: bool, max_length: int) -> bool:
-    if not value or len(value) > max_length:
-        return False
-    labels = value.split(".") if allow_dots else [value]
-    return all(
-        0 < len(label) <= 63
-        and re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", label) is not None
-        for label in labels
-    )
-
-
-def _resource_reference(manifest: Mapping[str, Any]) -> str | None:
-    identity = _manifest_identity(manifest)
-    if identity is None:
-        return None
-    namespace, name = identity
-    return f"apps/v1:Deployment/{namespace}/{name}"
-
-
-def _validate_deployment_structure(manifest: Any, label: str) -> list[str]:
-    """Validate the Kubernetes Deployment fields this tool relies on."""
-    problems: list[str] = []
-    if not isinstance(manifest, dict):
-        return [f"{label} must be a YAML mapping"]
-    if manifest.get("apiVersion") != "apps/v1" or manifest.get("kind") != "Deployment":
-        problems.append(f"{label} must be an apps/v1 Deployment")
-
-    metadata = manifest.get("metadata")
-    if not isinstance(metadata, dict):
-        problems.append(f"{label}.metadata must be a mapping")
-    else:
-        for field in ("name", "namespace"):
-            value = metadata.get(field)
-            if not isinstance(value, str) or not value.strip():
-                problems.append(f"{label}.metadata.{field} must be a non-empty string")
-            elif field == "name" and not _valid_dns_name(value, allow_dots=True, max_length=253):
-                problems.append(f"{label}.metadata.name must be a valid Kubernetes DNS subdomain")
-            elif field == "namespace" and not _valid_dns_name(value, allow_dots=False, max_length=63):
-                problems.append(f"{label}.metadata.namespace must be a valid Kubernetes DNS label")
-
-    spec = manifest.get("spec")
-    if not isinstance(spec, dict):
-        problems.append(f"{label}.spec must be a mapping")
-        return problems
-
-    selector = spec.get("selector")
-    match_labels = selector.get("matchLabels") if isinstance(selector, dict) else None
-    if not isinstance(match_labels, dict) or not match_labels:
-        problems.append(f"{label}.spec.selector.matchLabels must be a non-empty mapping")
-
-    template = spec.get("template")
-    if not isinstance(template, dict):
-        problems.append(f"{label}.spec.template must be a mapping")
-        return problems
-    template_metadata = template.get("metadata")
-    labels = template_metadata.get("labels") if isinstance(template_metadata, dict) else None
-    if not isinstance(labels, dict):
-        problems.append(f"{label}.spec.template.metadata.labels must be a mapping")
-    elif isinstance(match_labels, dict) and any(labels.get(k) != v for k, v in match_labels.items()):
-        problems.append(f"{label}.spec.template labels must satisfy spec.selector.matchLabels")
-
-    pod_spec = template.get("spec")
-    if not isinstance(pod_spec, dict):
-        problems.append(f"{label}.spec.template.spec must be a mapping")
-        return problems
-    containers = pod_spec.get("containers")
-    if not isinstance(containers, list) or not containers:
-        problems.append(f"{label}.spec.template.spec.containers must be a non-empty list")
-        return problems
-
-    names: list[str] = []
-    for index, container in enumerate(containers):
-        if not isinstance(container, dict):
-            problems.append(f"{label} container at index {index} must be a mapping")
-            continue
-        name = container.get("name")
-        if not isinstance(name, str) or not name.strip():
-            problems.append(f"{label} container at index {index} must have a non-empty name")
-        else:
-            names.append(name)
-        image = container.get("image")
-        if not isinstance(image, str) or not image.strip():
-            problems.append(f"{label} container at index {index} must have a non-empty image")
-    if len(names) != len(set(names)):
-        problems.append(f"{label} container names must be unique")
-    return problems
-
-
-def _find_container(manifest: Mapping[str, Any], container_name: str) -> dict[str, Any] | None:
-    spec = manifest.get("spec")
-    template = spec.get("template") if isinstance(spec, dict) else None
-    pod_spec = template.get("spec") if isinstance(template, dict) else None
-    containers = pod_spec.get("containers") if isinstance(pod_spec, dict) else None
-    if not isinstance(containers, list):
-        return None
-    matches = [
-        container
-        for container in containers
-        if isinstance(container, dict) and container.get("name") == container_name
-    ]
-    return matches[0] if len(matches) == 1 else None
-
-
-def _get_memory_limit(container: Mapping[str, Any]) -> Any:
-    resources = container.get("resources")
-    limits = resources.get("limits") if isinstance(resources, dict) else None
-    return limits.get("memory") if isinstance(limits, dict) else None
-
-
-def _set_memory_limit(manifest: dict[str, Any], container_name: str, value: Any) -> bool:
-    container = _find_container(manifest, container_name)
-    if container is None:
-        return False
-    resources = container.get("resources")
-    if resources is None:
-        resources = {}
-        container["resources"] = resources
-    if not isinstance(resources, dict):
-        return False
-    limits = resources.get("limits")
-    if limits is None:
-        limits = {}
-        resources["limits"] = limits
-    if not isinstance(limits, dict):
-        return False
-    limits["memory"] = value
-    return True
-
-
-def _security_violations(manifest: Mapping[str, Any]) -> list[str]:
-    violations: list[str] = []
-    spec = manifest.get("spec")
-    template = spec.get("template") if isinstance(spec, dict) else None
-    pod_spec = template.get("spec") if isinstance(template, dict) else None
-    if not isinstance(pod_spec, dict):
-        return ["Deployment pod spec is not a mapping"]
-
-    for field in ("hostNetwork", "hostPID", "hostIPC"):
-        if pod_spec.get(field) is True:
-            violations.append(f"pod spec {field}: true")
-
-    volumes = pod_spec.get("volumes", [])
-    if not isinstance(volumes, list):
-        violations.append("pod spec volumes must be a list")
-    else:
-        for index, volume in enumerate(volumes):
-            if isinstance(volume, dict) and "hostPath" in volume:
-                violations.append(f"pod volume at index {index} uses hostPath")
-
-    for collection_name in ("containers", "initContainers", "ephemeralContainers"):
-        containers = pod_spec.get(collection_name, [])
-        if not isinstance(containers, list):
-            violations.append(f"pod spec {collection_name} must be a list")
-            continue
-        for index, container in enumerate(containers):
-            if not isinstance(container, dict):
-                continue
-            security_context = container.get("securityContext", {})
-            if not isinstance(security_context, dict):
-                violations.append(f"{collection_name}[{index}].securityContext must be a mapping")
-                continue
-            if security_context.get("privileged") is True:
-                violations.append(f"{collection_name}[{index}] sets privileged: true")
-            if security_context.get("allowPrivilegeEscalation") is True:
-                violations.append(f"{collection_name}[{index}] sets allowPrivilegeEscalation: true")
-            capabilities = security_context.get("capabilities", {})
-            if isinstance(capabilities, dict):
-                added = capabilities.get("add", [])
-                if not isinstance(added, list):
-                    violations.append(f"{collection_name}[{index}] capabilities.add must be a list")
-                elif any(str(cap).upper() in {"SYS_ADMIN", "ALL"} for cap in added):
-                    violations.append(f"{collection_name}[{index}] adds SYS_ADMIN or ALL capabilities")
-    return violations
-
-
-def _parse_manifest(text: str) -> dict[str, Any]:
-    loaded = yaml.load(text, Loader=_UniqueKeySafeLoader)
-    if not isinstance(loaded, dict):
-        raise ValueError("manifest must be a YAML mapping")
-    return loaded
-
-
-def _revision(manifest: Mapping[str, Any]) -> str | None:
-    metadata = manifest.get("metadata")
-    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
-    value = annotations.get(REVISION_ANNOTATION) if isinstance(annotations, dict) else None
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-class DeterministicPolicyValidator:
-    """Fail-closed checks for the narrowly supported Deployment proposal types."""
-
-    @classmethod
-    def validate(
-        cls,
-        operation: str,
-        target_resource: str,
-        before_manifest: str,
-        after_manifest: str,
-        prior_known_good: str | None = None,
-        *,
-        current_identifier: str | None = None,
-        target_container: str | None = None,
-        current_memory_limit: Any | None = None,
-        previous_memory_limit: Any | None = None,
-    ) -> tuple[list[PolicyCheckResult], bool]:
-        checks: list[PolicyCheckResult] = []
-        try:
-            before_obj = _parse_manifest(before_manifest)
-            after_obj = _parse_manifest(after_manifest)
-        except (yaml.YAMLError, ValueError, TypeError) as exc:
-            checks.append(
-                PolicyCheckResult(
-                    check_name="valid_yaml_syntax",
-                    passed=False,
-                    details=f"Source and proposed manifests must be valid YAML mappings with unique keys: {exc}",
-                )
-            )
-            return checks, False
-        checks.append(
-            PolicyCheckResult(
-                check_name="valid_yaml_syntax",
-                passed=True,
-                details="Source and proposed manifests are valid YAML mappings with unique keys.",
-            )
-        )
-
-        structure_errors = _validate_deployment_structure(before_obj, "Source manifest")
-        structure_errors.extend(_validate_deployment_structure(after_obj, "Proposed manifest"))
-        checks.append(
-            PolicyCheckResult(
-                check_name="deployment_structure",
-                passed=not structure_errors,
-                details=(
-                    "Both manifests contain the required apps/v1 Deployment identity, selector, template, and containers."
-                    if not structure_errors
-                    else "; ".join(structure_errors)
-                ),
-            )
-        )
-
-        before_ref = _resource_reference(before_obj)
-        after_ref = _resource_reference(after_obj)
-        same_identity = before_ref is not None and before_ref == after_ref
-        exact_target = same_identity and target_resource == after_ref
-        checks.append(
-            PolicyCheckResult(
-                check_name="target_resource_allowlist",
-                passed=exact_target,
-                details=(
-                    f"Both manifests match the exact requested target '{target_resource}'."
-                    if exact_target
-                    else f"Requested target '{target_resource}' must exactly match the same source and proposed Deployment identity (source={before_ref!r}, proposed={after_ref!r})."
-                ),
-            )
-        )
-
-        security_errors = _security_violations(after_obj)
-        checks.append(
-            PolicyCheckResult(
-                check_name="privilege_escalation_guardrail",
-                passed=not security_errors,
-                details=(
-                    "No prohibited host access, hostPath mount, or privilege-escalation settings were found in the proposed pod spec."
-                    if not security_errors
-                    else "; ".join(security_errors)
-                ),
-            )
-        )
-
-        if operation not in ALLOWED_OPERATIONS:
-            checks.append(
-                PolicyCheckResult(
-                    check_name="operation_allowlist",
-                    passed=False,
-                    details=f"Unsupported proposal operation '{operation}'.",
-                )
-            )
-            return checks, False
-        checks.append(
-            PolicyCheckResult(
-                check_name="operation_allowlist",
-                passed=True,
-                details=f"Operation '{operation}' is explicitly supported.",
-            )
-        )
-
-        if operation == "ROLLBACK_REVISION":
-            prior = prior_known_good.strip() if isinstance(prior_known_good, str) else ""
-            current = current_identifier.strip() if isinstance(current_identifier, str) else ""
-            revision_check = bool(
-                prior
-                and current
-                and prior != current
-                and _revision(before_obj) == current
-                and _revision(after_obj) == prior
-            )
-            checks.append(
-                PolicyCheckResult(
-                    check_name="explicit_rollback_target",
-                    passed=revision_check,
-                    details=(
-                        f"Source and rollback snapshots are explicitly stamped with current revision '{current}' and prior known-good revision '{prior}'."
-                        if revision_check
-                        else f"Both snapshots must carry {REVISION_ANNOTATION}: source='{_revision(before_obj)}', proposed='{_revision(after_obj)}', expected source='{current}', expected prior='{prior}'."
-                    ),
-                )
-            )
-            before_spec = before_obj.get("spec")
-            after_spec = after_obj.get("spec")
-            selector_unchanged = (
-                isinstance(before_spec, dict)
-                and isinstance(after_spec, dict)
-                and before_spec.get("selector") == after_spec.get("selector")
-            )
-            checks.append(
-                PolicyCheckResult(
-                    check_name="deployment_selector_unchanged",
-                    passed=selector_unchanged,
-                    details=(
-                        "The immutable Deployment selector is identical in both snapshots."
-                        if selector_unchanged
-                        else "Rollback snapshots must have the same Deployment selector."
-                    ),
-                )
-            )
-
-        if operation == "ADJUST_RESOURCE_LIMITS":
-            container_name = target_container.strip() if isinstance(target_container, str) else ""
-            before_container = _find_container(before_obj, container_name) if container_name else None
-            after_container = _find_container(after_obj, container_name) if container_name else None
-            old_memory = _get_memory_limit(before_container) if before_container else None
-            new_memory = _get_memory_limit(after_container) if after_container else None
-            try:
-                telemetry_current_matches = (
-                    old_memory is not None
-                    and current_memory_limit is not None
-                    and _parse_memory_to_bytes(old_memory) == _parse_memory_to_bytes(current_memory_limit)
-                )
-                different_memory = (
-                    old_memory is not None
-                    and new_memory is not None
-                    and _parse_memory_to_bytes(old_memory) != _parse_memory_to_bytes(new_memory)
-                )
-                target_previous_matches = (
-                    new_memory is not None
-                    and previous_memory_limit is not None
-                    and _parse_memory_to_bytes(new_memory) == _parse_memory_to_bytes(previous_memory_limit)
-                )
-                proposed_bytes = _parse_memory_to_bytes(new_memory)
-                within_bounds = MIN_MEMORY_BYTES <= proposed_bytes <= MAX_MEMORY_BYTES
-                if not within_bounds:
-                    bounds_detail = (
-                        f"Proposed memory limit is outside [{MIN_MEMORY_BYTES // MIB}Mi, {MAX_MEMORY_BYTES // MIB}Mi]."
-                    )
-                else:
-                    bounds_detail = f"Proposed memory limit is within configured policy bounds [{MIN_MEMORY_BYTES // MIB}Mi, {MAX_MEMORY_BYTES // MIB}Mi]."
-            except (ValueError, TypeError):
-                telemetry_current_matches = False
-                different_memory = False
-                target_previous_matches = False
-                within_bounds = False
-                bounds_detail = "Memory quantities are missing or invalid; resource bounds could not be verified."
-
-            exact_memory_target = bool(container_name and before_container and after_container)
-            checks.append(
-                PolicyCheckResult(
-                    check_name="explicit_memory_target_and_baseline",
-                    passed=exact_memory_target and telemetry_current_matches,
-                    details=(
-                        f"Container '{container_name}' exists exactly once and its source memory limit matches the incident record."
-                        if exact_memory_target and telemetry_current_matches
-                        else "A named target_container and an exact source-manifest memory limit matching details.memory_limit are required."
-                    ),
-                )
-            )
-            checks.append(
-                PolicyCheckResult(
-                    check_name="explicit_prior_memory_limit",
-                    passed=target_previous_matches and different_memory,
-                    details=(
-                        "The proposed memory limit matches the explicitly supplied previous_memory_limit."
-                        if target_previous_matches and different_memory
-                        else "The proposed memory limit must match an explicit previous_memory_limit and differ from the current value."
-                    ),
-                )
-            )
-            checks.append(
-                PolicyCheckResult(
-                    check_name="bounded_memory_change",
-                    passed=bool(
-                        before_container
-                        and after_container
-                        and container_name
-                        and _only_target_memory_limit_changed(
-                            before_obj,
-                            after_obj,
-                            container_name,
-                        )
-                    ),
-                    details=(
-                        f"Only {container_name}'s memory limit differs between source and proposal."
-                        if before_container
-                        and after_container
-                        and container_name
-                        and _only_target_memory_limit_changed(before_obj, after_obj, container_name)
-                        else "A resource-limit proposal may change only the explicitly targeted container's memory limit."
-                    ),
-                )
-            )
-            checks.append(
-                PolicyCheckResult(
-                    check_name="resource_bounds_check",
-                    passed=within_bounds,
-                    details=bounds_detail,
-                )
-            )
-
-        return checks, all(check.passed for check in checks)
-
-
-def _only_target_memory_limit_changed(
-    before_obj: Mapping[str, Any],
-    after_obj: Mapping[str, Any],
-    container_name: str,
-) -> bool:
-    """Compare complete objects after applying just the requested memory-limit change."""
-    before_copy = copy.deepcopy(dict(before_obj))
-    after_copy = copy.deepcopy(dict(after_obj))
-    after_container = _find_container(after_copy, container_name)
-    proposed_memory = _get_memory_limit(after_container) if after_container else None
-    if proposed_memory is None or not _set_memory_limit(before_copy, container_name, proposed_memory):
-        return False
-    return before_copy == after_copy
+# Re-exports for backward compatibility
+__all__ = [
+    "RemediationProposalGenerator",
+    "DeterministicPolicyValidator",
+    "_ProposalPolicyFailure",
+    "_parse_memory_to_bytes",
+    "_UniqueKeySafeLoader",
+    "_parse_manifest",
+    "_manifest_identity",
+    "_resource_reference",
+    "_valid_dns_name",
+    "_validate_deployment_structure",
+    "_find_container",
+    "_get_memory_limit",
+    "_set_memory_limit",
+    "_revision",
+    "_security_violations",
+    "_only_target_memory_limit_changed",
+]
 
 
 class RemediationProposalGenerator:

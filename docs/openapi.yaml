@@ -1,0 +1,378 @@
+openapi: 3.1.0
+info:
+  title: HiveMind Incident Investigation API
+  description: Safety-first, read-only incident investigation and remediation proposal
+    tool. Strictly operates offline without cluster mutation capabilities.
+  version: 0.1.0
+paths:
+  /healthz:
+    get:
+      summary: Liveness Health Probe
+      description: Health check endpoint confirming service status and read-only operation.
+      operationId: healthz_healthz_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Healthz Healthz Get
+  /readyz:
+    get:
+      summary: Readiness Probe
+      description: Report readiness; the API is stateless and has no external dependency
+        checks.
+      operationId: readyz_readyz_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  anyOf:
+                  - type: boolean
+                  - type: string
+                type: object
+                title: Response Readyz Readyz Get
+  /analyze:
+    post:
+      summary: Analyze Incident Telemetry
+      description: Accepts an incident payload (JSON or YAML) and returns deterministic
+        correlation findings.
+      operationId: analyze_incident_analyze_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentAnalysisReport'
+        '400':
+          description: Malformed JSON or YAML input, excessive depth, or key count
+        '413':
+          description: Payload exceeds maximum allowed size
+        '422':
+          description: Validation failure against strict IncidentEvent schema
+        '503':
+          description: Concurrency limit reached; service temporarily unavailable
+components:
+  schemas:
+    AnalysisStatus:
+      type: string
+      enum:
+      - DIAGNOSED
+      - INCONCLUSIVE
+      title: AnalysisStatus
+    CandidateCause:
+      properties:
+        candidate_id:
+          type: string
+          title: Candidate Id
+          description: Deterministic candidate identifier
+        title:
+          type: string
+          title: Title
+          description: Short diagnostic title
+        description:
+          type: string
+          title: Description
+          description: Clear explanation of the candidate root cause
+        evidence_score:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Evidence Score
+          description: Deterministic evidence score (0.0 to 1.0) calculated from rule
+            weights
+        scoring_breakdown:
+          additionalProperties:
+            type: number
+          type: object
+          title: Scoring Breakdown
+          description: Auditable additive breakdown of weights that produced evidence_score
+        supporting_evidence:
+          items:
+            $ref: '#/components/schemas/EvidenceReference'
+          type: array
+          title: Supporting Evidence
+          description: Exact input records supporting this candidate
+        contradicting_evidence:
+          items:
+            $ref: '#/components/schemas/EvidenceReference'
+          type: array
+          title: Contradicting Evidence
+          description: Exact input records that conflict with or weaken this candidate
+        rationale:
+          type: string
+          title: Rationale
+          description: Traceable rationale derived strictly from cited evidence
+        uncertainty:
+          type: string
+          title: Uncertainty
+          description: Known gaps, assumptions, or alternative explanations
+        missing_evidence:
+          items:
+            type: string
+          type: array
+          title: Missing Evidence
+          description: List of telemetry or data points that would be needed for higher
+            certainty
+      additionalProperties: false
+      type: object
+      required:
+      - candidate_id
+      - title
+      - description
+      - evidence_score
+      - scoring_breakdown
+      - supporting_evidence
+      - rationale
+      - uncertainty
+      title: CandidateCause
+      description: Ranked diagnosis candidate supported by deterministic evidence.
+    EvidenceReference:
+      properties:
+        record_type:
+          type: string
+          title: Record Type
+          description: signal, change, dependency, or log
+        record_id:
+          type: string
+          title: Record Id
+          description: Exact ID of cited record in input
+        summary:
+          type: string
+          title: Summary
+          description: Brief factual summary of what record indicates
+      additionalProperties: false
+      type: object
+      required:
+      - record_type
+      - record_id
+      - summary
+      title: EvidenceReference
+      description: Pointer to a specific record in the incident input.
+    IncidentAnalysisReport:
+      properties:
+        incident_id:
+          type: string
+          title: Incident Id
+          description: ID of analyzed incident
+        environment:
+          type: string
+          title: Environment
+          description: Environment of the incident
+        status:
+          $ref: '#/components/schemas/AnalysisStatus'
+          description: DIAGNOSED or INCONCLUSIVE
+        summary:
+          type: string
+          title: Summary
+          description: High-level narrative of findings
+        analysis_window_start:
+          type: string
+          format: date-time
+          title: Analysis Window Start
+          description: Start of lookback window
+        analysis_window_end:
+          type: string
+          format: date-time
+          title: Analysis Window End
+          description: Detection timestamp (window end)
+        ranked_candidates:
+          items:
+            $ref: '#/components/schemas/CandidateCause'
+          type: array
+          title: Ranked Candidates
+          description: Candidate causes ranked by evidence score descending
+        proposal:
+          anyOf:
+          - $ref: '#/components/schemas/RemediationProposal'
+          - type: 'null'
+          description: Constrained remediation proposal if criteria met, else None
+        proposal_generation:
+          $ref: '#/components/schemas/ProposalGenerationOutcome'
+          description: Structured reason and telemetry-evidence summary for proposal
+            generation
+        inconclusive_reasons:
+          items:
+            type: string
+          type: array
+          title: Inconclusive Reasons
+          description: Explicit reasons if investigation yielded INCONCLUSIVE
+        telemetry_warnings:
+          items:
+            type: string
+          type: array
+          title: Telemetry Warnings
+          description: Non-fatal telemetry gaps or warnings noted when status is DIAGNOSED
+        safety_notice:
+          type: string
+          title: Safety Notice
+          description: Unchanging mandatory safety declaration
+          default: HiveMind is strictly READ-ONLY. No changes were applied to any
+            Kubernetes cluster or infrastructure. Proposals must be reviewed, tested,
+            and applied manually by operators.
+      additionalProperties: false
+      type: object
+      required:
+      - incident_id
+      - environment
+      - status
+      - summary
+      - analysis_window_start
+      - analysis_window_end
+      title: IncidentAnalysisReport
+      description: Complete auditable incident investigation report.
+    PolicyCheckResult:
+      properties:
+        check_name:
+          type: string
+          title: Check Name
+          description: Identifier of the policy check
+        passed:
+          type: boolean
+          title: Passed
+          description: Whether the check succeeded
+        details:
+          type: string
+          title: Details
+          description: Explanation of check result or rejection reason
+      additionalProperties: false
+      type: object
+      required:
+      - check_name
+      - passed
+      - details
+      title: PolicyCheckResult
+      description: Result of a single deterministic policy check on a proposal.
+    ProposalGenerationOutcome:
+      properties:
+        status:
+          $ref: '#/components/schemas/ProposalGenerationStatus'
+        reason_code:
+          $ref: '#/components/schemas/ProposalGenerationReasonCode'
+        message:
+          type: string
+          title: Message
+        failed_policy_checks:
+          items:
+            type: string
+          type: array
+          title: Failed Policy Checks
+        telemetry_evidence_count:
+          type: integer
+          minimum: 0.0
+          title: Telemetry Evidence Count
+          default: 0
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - reason_code
+      - message
+      title: ProposalGenerationOutcome
+      description: Safe summary explaining whether a remediation proposal was produced.
+    ProposalGenerationReasonCode:
+      type: string
+      enum:
+      - GENERATED
+      - DIAGNOSIS_NOT_CONFIRMED
+      - UNSUPPORTED_CAUSE
+      - CHANGE_NOT_FOUND
+      - SOURCE_MANIFEST_MISSING
+      - SOURCE_MANIFEST_INVALID
+      - TARGET_IDENTITY_INVALID
+      - MEMORY_EVIDENCE_MISSING
+      - MEMORY_QUANTITY_INVALID
+      - MEMORY_BASELINE_MISMATCH
+      - MEMORY_NO_OP
+      - PRIOR_MANIFEST_MISSING
+      - REVISION_MISMATCH
+      - SELECTOR_MISMATCH
+      - TELEMETRY_REFERENCE_INVALID
+      - POLICY_REJECTED
+      - SERIALIZATION_FAILED
+      - INTERNAL_ERROR
+      title: ProposalGenerationReasonCode
+    ProposalGenerationStatus:
+      type: string
+      enum:
+      - GENERATED
+      - NOT_GENERATED
+      - NOT_ATTEMPTED
+      title: ProposalGenerationStatus
+    RemediationProposal:
+      properties:
+        proposal_id:
+          type: string
+          title: Proposal Id
+          description: Unique proposal identifier
+        operation:
+          type: string
+          title: Operation
+          description: ROLLBACK_REVISION or ADJUST_RESOURCE_LIMITS
+        target_resource:
+          type: string
+          title: Target Resource
+          description: 'Format: <apiVersion>:<kind>/<namespace>/<name>'
+        before_manifest:
+          type: string
+          title: Before Manifest
+          description: Current YAML manifest snippet
+        after_manifest:
+          type: string
+          title: After Manifest
+          description: Proposed YAML manifest snippet
+        diff:
+          type: string
+          title: Diff
+          description: Unified diff showing proposed modification
+        evidence_references:
+          items:
+            $ref: '#/components/schemas/EvidenceReference'
+          type: array
+          title: Evidence References
+          description: Evidence records justifying this proposal
+        rationale:
+          type: string
+          title: Rationale
+          description: Explanation of why this proposal addresses the diagnosis
+        assumptions_and_limitations:
+          items:
+            type: string
+          type: array
+          title: Assumptions And Limitations
+          description: Explicit boundaries, side effects, and rollback notes
+        policy_checks:
+          items:
+            $ref: '#/components/schemas/PolicyCheckResult'
+          type: array
+          title: Policy Checks
+          description: Deterministic policy check verdicts
+        all_policy_checks_passed:
+          type: boolean
+          title: All Policy Checks Passed
+          description: True only if every deterministic policy check passed
+        status:
+          type: string
+          title: Status
+          description: Proposal execution state. Always NOT_APPLIED for HiveMind MVP
+          default: NOT_APPLIED
+      additionalProperties: false
+      type: object
+      required:
+      - proposal_id
+      - operation
+      - target_resource
+      - before_manifest
+      - after_manifest
+      - diff
+      - evidence_references
+      - rationale
+      - all_policy_checks_passed
+      title: RemediationProposal
+      description: Constrained, human-reviewable remediation diff for Kubernetes resources.
