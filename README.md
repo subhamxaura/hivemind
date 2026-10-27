@@ -1,8 +1,5 @@
-<<<<<<< HEAD
-# HiveMind 
-=======
 # HiveMind
->>>>>>> 446494d (feat: add production deployment and security hardening)
+
 
 <p align="center">
   <img src="assets/hivemind_overview.jpg" alt="HiveMind Overview" width="100%" />
@@ -75,6 +72,32 @@ Inspect an incident with contradictory evidence:
 ```bash
 hivemind analyze fixtures/incident_contradictory_evidence.yaml
 ```
+
+Analyze and write report directly to an output directory:
+```bash
+hivemind analyze fixtures/incident_diagnosable.yaml --output-dir reports/
+```
+
+Batch analyze all incident files in a directory:
+```bash
+hivemind batch fixtures/
+```
+
+Disable terminal color formatting:
+```bash
+hivemind analyze fixtures/incident_diagnosable.yaml --no-color
+# Or set the standard NO_COLOR environment variable:
+NO_COLOR=1 hivemind batch fixtures/
+```
+
+### Configuration:
+HiveMind supports environment-based configuration prefixed with `HIVEMIND_`:
+- `HIVEMIND_DIAGNOSIS_SCORE_THRESHOLD`: Score required for DIAGNOSED status (default: `0.60`)
+- `HIVEMIND_COMPETITIVE_MARGIN_THRESHOLD`: Margin required over second candidate (default: `0.15`)
+- `HIVEMIND_MAX_REQUEST_BODY_BYTES`: API maximum body size in bytes (default: `1048576`)
+- `HIVEMIND_MAX_YAML_DEPTH`: API YAML max nesting depth (default: `20`)
+- `HIVEMIND_MAX_YAML_KEYS`: API YAML max total mapping keys (default: `10000`)
+- `HIVEMIND_ANALYSIS_CONCURRENCY`: Max concurrent /analyze requests (default: `4`)
 
 ### Local API Usage:
 Start the local FastAPI server:
@@ -308,7 +331,66 @@ Run static type checking:
 python -m mypy src/
 ```
 
-The GitHub Actions workflow at `.github/workflows/ci.yml` runs tests (including proposal and deployment-config integration checks), Ruff, and mypy on Python 3.11 and 3.12. It validates Prometheus rules and Compose, builds and smoke-tests the production container on pushes and pull requests. A matching version tag additionally publishes the multi-architecture GHCR image with build provenance and an SBOM.
+The GitHub Actions workflow at `.github/workflows/ci.yml` runs verification on Python 3.11 and 3.12 (unit/integration tests, proposal end-to-end checks, Ruff linting, and mypy type checks). It validates Prometheus rules and Docker Compose, builds the production container, and smoke-tests the hardened container on pushes and pull requests to `main`.
 
 
 The `.github/dependabot.yml` configuration checks Python packages, the Dockerfile, Docker Compose images, Kubernetes image tags, and GitHub Actions weekly. Review its update pull requests through the same CI checks before merging.
+---
+
+## 10. Branch Protection Policy
+
+The default `main` branch is protected by GitHub branch protection against accidental direct pushes, history rewriting, and unreviewed changes:
+
+| Protection Control | Policy Setting | Rationale |
+|---|---|---|
+| **Pull Requests Required** | Active (`required_pull_request_reviews`) | All code modifications must be submitted via pull requests. |
+| **Strict CI Status Checks** | Active (`strict: true`) | Branches must be up to date with `main` and pass required CI checks before merging. |
+| **Required Status Checks** | `Verify (Python 3.11)`<br>`Verify (Python 3.12)`<br>`Build and smoke-test container` | Discovered from actual check runs; ensures Python versions and container hardening pass. |
+| **Force Push Prevention** | Active (`allow_force_pushes: false`) | Protects repository history from force-push overwrites. |
+| **Deletion Prevention** | Active (`allow_deletions: false`) | Prevents accidental deletion of the `main` branch. |
+| **Conversation Resolution** | Active (`required_conversation_resolution: true`) | Requires all pull request review discussions to be resolved before merge. |
+| **Maintainer Compatibility** | `required_approving_review_count: 0`<br>`enforce_admins: false` | Compatible with sole-maintainer workflow without blocking PR merges while still enforcing CI and PR process. |
+
+Verify branch protection via GitHub CLI:
+```bash
+gh api repos/subhamxaura/hivemind/branches/main/protection
+```
+
+---
+
+## 11. Release Automation & GHCR Publishing
+
+Image publication is decoupled from pull-request verification and managed via `.github/workflows/release.yml`.
+
+### Release Workflow Guarantees:
+- **Explicit Trigger**: Runs only on semantic version tags (`v*.*.*`) or explicit manual `workflow_dispatch`.
+- **Version Parity Gate**: Enforces that Git tag version (e.g. `v0.1.0`) strictly matches `project.version` in `pyproject.toml` (`0.1.0`). If mismatched, the workflow aborts before building.
+- **Pre-Publish Verification**: Runs the full test suite, linting, type checks, and smoke tests prior to pushing.
+- **Least Privilege**: The default token permissions are `contents: read`; `packages: write` is scoped exclusively to the publish job.
+- **Multi-Architecture**: Builds and pushes images for `linux/amd64` and `linux/arm64` using Docker Buildx.
+- **Deterministic Tagging**:
+  - `ghcr.io/subhamxaura/hivemind:<version>` (e.g., `0.1.0`)
+  - `ghcr.io/subhamxaura/hivemind:sha-<short-sha>` (immutable commit reference)
+  - `ghcr.io/subhamxaura/hivemind:latest` (convenience floating tag)
+- **Supply-Chain Attestations**: Generates SLSA build provenance and OCI Software Bill of Materials (SBOM).
+- **Post-Publish Verification**: Verifies the remote multi-arch manifest using `docker buildx imagetools inspect`.
+
+### Releasing a new version:
+1. Ensure `pyproject.toml` has the desired version (e.g. `version = "0.1.0"`).
+2. Tag the commit and push:
+   ```bash
+   git tag -a v0.1.0 -m "Release v0.1.0"
+   git push origin v0.1.0
+   ```
+3. Monitor release progress:
+   ```bash
+   gh run list --workflow release.yml
+   ```
+4. Verify the published image from your environment:
+   ```bash
+   docker pull ghcr.io/subhamxaura/hivemind:0.1.0
+   ```
+Verified Release v0.1.0 Multi-Architecture Image Digest:
+```text
+ghcr.io/subhamxaura/hivemind@sha256:c50dac3a5d3f8f6bef1c35153946e2d0cc98831d36a796d845db7e898ede5f71
+```

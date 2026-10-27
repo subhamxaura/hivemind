@@ -22,9 +22,10 @@ HiveMind is architected as an offline, deterministic evaluation pipeline:
           │ Diagnosed / Inconclusive Report
           ▼
 ┌─────────────────────────┐
-│ Constrained Proposal &  │  --> Restricted to apps/v1 Deployment
-│ Deterministic Policies  │  --> Privilege escalation guardrails
-│                         │  --> Unified diff generation
+│ Constrained Proposal &  │  --> k8s_manifest: parse, identity, validation
+│ Deterministic Policies  │  --> security: privilege escalation guardrails
+│ (Split Modules)         │  --> policy: deterministic policy validator
+│                         │  --> proposal: diff & proposal generation
 └──────────┬──────────────┘
           │
           ├──> CLI (human-readable table/json, exit codes 0/1/2)
@@ -34,7 +35,7 @@ HiveMind is architected as an offline, deterministic evaluation pipeline:
 ## 2. Safety Boundaries & Threat Model
 
 1. **No Application-Level External Integration or Mutating Cluster Access**:
-   The API contains no outbound-call feature, production-mutating code path, cluster connection client (`kubernetes`, `pykube`), or cloud provider SDK. Network egress is controlled by deployment configuration: the Compose bridge is internal, and the optional Kubernetes NetworkPolicy denies API egress.
+   The API contains no outbound-call feature, production-mutating code path, cluster connection client (`kubernetes`, `pykube`), or cloud provider SDK. Network egress is controlled by deployment configuration: the Compose bridge network uses internal: false to support local Docker Desktop port publishing while binding all exposed service ports strictly to loopback (127.0.0.1), and the optional Kubernetes NetworkPolicy denies API egress.
 
 2. **Model Output & Input as Untrusted**:
    All incident inputs and generated proposals are treated as untrusted data. Validation fails closed:

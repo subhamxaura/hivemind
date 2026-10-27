@@ -35,7 +35,7 @@ services:
       - monitoring
 
   prometheus:
-    image: prom/prometheus:v3.13.5
+    image: prom/prometheus:v3.15.1
     restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -96,6 +96,8 @@ services:
 networks:
   monitoring:
     driver: bridge
+    # internal: false allows Docker Desktop / host loopback port forwarding.
+    # All container ports bind exclusively to 127.0.0.1 on the host.
     internal: false
 
 volumes:

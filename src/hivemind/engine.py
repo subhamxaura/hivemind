@@ -7,6 +7,7 @@ and topology dependencies without black-box inferences or network calls.
 import logging
 from datetime import datetime, timedelta
 
+from hivemind.config import HiveMindConfig
 from hivemind.models import (
     AnalysisStatus,
     AnomalySignal,
@@ -24,7 +25,7 @@ from hivemind.proposal import RemediationProposalGenerator
 
 logger = logging.getLogger(__name__)
 
-# Threshold above which a candidate may yield DIAGNOSED if not contested
+# Default threshold aliases for backwards compatibility
 DIAGNOSIS_SCORE_THRESHOLD = 0.60
 COMPETITIVE_MARGIN_THRESHOLD = 0.15
 
@@ -32,8 +33,9 @@ COMPETITIVE_MARGIN_THRESHOLD = 0.15
 class DeterministicCorrelationEngine:
     """Evaluates structured incident evidence against explicit, documented rules."""
 
-    def __init__(self, incident: IncidentEvent):
+    def __init__(self, incident: IncidentEvent, config: HiveMindConfig | None = None):
         self.incident = incident
+        self.config = config if config is not None else HiveMindConfig()
         self.window_end: datetime = incident.detection_timestamp
         self.window_start: datetime = self.window_end - timedelta(
             minutes=incident.analysis_window_minutes
@@ -79,23 +81,26 @@ class DeterministicCorrelationEngine:
         failure_reasons: list[str] = []
         summary: str
 
+        threshold = self.config.diagnosis_score_threshold
+        margin = self.config.competitive_margin_threshold
+
         if not candidates:
             failure_reasons.append("No plausible candidate causes identified from provided evidence.")
             summary = "Investigation yielded no strong candidate root cause due to absence of correlating events."
-        elif candidates[0].evidence_score < DIAGNOSIS_SCORE_THRESHOLD:
+        elif candidates[0].evidence_score < threshold:
             failure_reasons.append(
                 f"Top candidate '{candidates[0].title}' score ({candidates[0].evidence_score:.2f}) "
-                f"is below the deterministic threshold ({DIAGNOSIS_SCORE_THRESHOLD:.2f})."
+                f"is below the deterministic threshold ({threshold:.2f})."
             )
             summary = (
                 f"Investigation inconclusive: Highest evidence score ({candidates[0].evidence_score:.2f}) "
                 f"for candidate '{candidates[0].title}' lacks sufficient evidence."
             )
-        elif len(candidates) > 1 and (candidates[0].evidence_score - candidates[1].evidence_score) < COMPETITIVE_MARGIN_THRESHOLD:
+        elif len(candidates) > 1 and (candidates[0].evidence_score - candidates[1].evidence_score) < margin:
             failure_reasons.append(
                 f"Competing candidates '{candidates[0].title}' ({candidates[0].evidence_score:.2f}) and "
                 f"'{candidates[1].title}' ({candidates[1].evidence_score:.2f}) differ by less than "
-                f"margin threshold ({COMPETITIVE_MARGIN_THRESHOLD:.2f}); competing evidence cannot be resolved deterministically."
+                f"margin threshold ({margin:.2f}); competing evidence cannot be resolved deterministically."
             )
             summary = (
                 f"Investigation inconclusive due to competing hypotheses: '{candidates[0].title}' vs "
@@ -165,6 +170,7 @@ class DeterministicCorrelationEngine:
     def _evaluate_change_candidates(self) -> list[CandidateCause]:
         """Evaluates whether recent deployment/config changes correlated with anomalies."""
         results: list[CandidateCause] = []
+        scoring = self.config.scoring
 
         for change in self.window_changes:
             if change.service not in self.incident.affected_services:
@@ -205,16 +211,16 @@ class DeterministicCorrelationEngine:
                         ),
                     )
                 )
-                breakdown["temporal_sequence_violation_penalty"] = -0.40
+                breakdown["temporal_sequence_violation_penalty"] = scoring.temporal_violation_penalty
             else:
-                breakdown["base_change_relevance"] = 0.40
+                breakdown["base_change_relevance"] = scoring.base_change_relevance
 
                 # Proximity bonus: Change applied within 15 minutes before the anomaly
                 delta_minutes = (earliest_signal.timestamp - change.timestamp).total_seconds() / 60.0
                 if delta_minutes <= 15.0:
-                    breakdown["temporal_proximity_bonus"] = 0.20
+                    breakdown["temporal_proximity_bonus"] = scoring.temporal_proximity_15m
                 elif delta_minutes <= 30.0:
-                    breakdown["temporal_proximity_bonus"] = 0.10
+                    breakdown["temporal_proximity_bonus"] = scoring.temporal_proximity_30m
 
             # Correlate specific signal types with change details
             has_matching_signature = False
@@ -244,7 +250,7 @@ class DeterministicCorrelationEngine:
                     has_matching_signature = True
 
             if has_matching_signature:
-                breakdown["signature_match_bonus"] = 0.25
+                breakdown["signature_match_bonus"] = scoring.signature_match
 
             # Correlate logs on this service
             svc_logs = [entry for entry in self.window_logs if entry.service == change.service]
@@ -271,7 +277,7 @@ class DeterministicCorrelationEngine:
                             summary=f"Error log on {change.service}: {log.message[:80]}...",
                         )
                     )
-                    breakdown["log_corroboration_bonus"] = 0.10
+                    breakdown["log_corroboration_bonus"] = scoring.log_corroboration
                     break
 
             if not change.prior_known_good_identifier:
@@ -313,6 +319,7 @@ class DeterministicCorrelationEngine:
     def _evaluate_dependency_candidates(self) -> list[CandidateCause]:
         """Evaluates whether failure originated in an upstream or downstream dependency."""
         results: list[CandidateCause] = []
+        scoring = self.config.scoring
 
         for dep in self.incident.dependencies:
             if dep.source_service not in self.incident.affected_services:
@@ -341,7 +348,7 @@ class DeterministicCorrelationEngine:
             missing: list[str] = []
 
             if anomaly_target_signals:
-                breakdown["base_dependency_signal"] = 0.35
+                breakdown["base_dependency_signal"] = scoring.base_dependency_signal
                 for sig in anomaly_target_signals:
                     supporting.append(
                         EvidenceReference(
@@ -352,7 +359,7 @@ class DeterministicCorrelationEngine:
                     )
 
                 if dep.critical:
-                    breakdown["critical_dependency_weight"] = 0.25
+                    breakdown["critical_dependency_weight"] = scoring.critical_dependency_weight
 
                 # Check if dependency anomaly preceded source service anomalies
                 source_signals = [s for s in self.window_signals if s.service == dep.source_service]
@@ -360,7 +367,7 @@ class DeterministicCorrelationEngine:
                     earliest_source = min(source_signals, key=lambda s: s.timestamp)
                     earliest_target = min(anomaly_target_signals, key=lambda s: s.timestamp)
                     if earliest_target.timestamp <= earliest_source.timestamp:
-                        breakdown["temporal_precedence_bonus"] = 0.20
+                        breakdown["temporal_precedence_bonus"] = scoring.temporal_precedence
                         supporting.append(
                             EvidenceReference(
                                 record_type="signal",
@@ -382,7 +389,7 @@ class DeterministicCorrelationEngine:
                             summary=f"Dependency {target_svc} reported healthy status: {h_sig.name}={h_sig.value}",
                         )
                     )
-                breakdown["healthy_telemetry_contradiction_penalty"] = -0.35
+                breakdown["healthy_telemetry_contradiction_penalty"] = scoring.healthy_contradiction_penalty
 
             # Correlate client logs mentioning downstream service
             source_logs = [entry for entry in self.window_logs if entry.service == dep.source_service]
@@ -395,7 +402,7 @@ class DeterministicCorrelationEngine:
                             summary=f"Source service log references {target_svc}: {log.message[:80]}...",
                         )
                     )
-                    breakdown["client_log_correlation_bonus"] = 0.10
+                    breakdown["client_log_correlation_bonus"] = scoring.client_log_correlation
                     break
 
             raw_score = sum(breakdown.values())

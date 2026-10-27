@@ -5,6 +5,10 @@ metadata:
   labels:
     app.kubernetes.io/name: hivemind
     app.kubernetes.io/part-of: hivemind
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -36,6 +40,12 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      # If your GHCR package is private, create a registry secret:
+      #   kubectl -n hivemind create secret docker-registry ghcr-secret \
+      #     --docker-server=ghcr.io --docker-username=<GITHUB_USER> --docker-password=<PAT>
+      # and uncomment imagePullSecrets below:
+      # imagePullSecrets:
+      #   - name: ghcr-secret
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
@@ -53,6 +63,8 @@ spec:
               app.kubernetes.io/component: api
       containers:
         - name: api
+          # Immutable multi-arch image digest for v0.1.0:
+          # image: ghcr.io/subhamxaura/hivemind@sha256:c50dac3a5d3f8f6bef1c35153946e2d0cc98831d36a796d845db7e898ede5f71
           image: ghcr.io/subhamxaura/hivemind:0.1.0
           imagePullPolicy: IfNotPresent
           ports:

@@ -1,6 +1,7 @@
 """Tests for HiveMind CLI commands, output formats, and exit codes."""
 
 import json
+import shutil
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -81,3 +82,64 @@ def test_cli_missing_file():
     runner = CliRunner()
     result = runner.invoke(main, ["analyze", "non_existent_file.yaml"])
     assert result.exit_code != 0
+
+
+def test_cli_batch_mode_with_multiple_fixtures(tmp_path: Path):
+    f1 = Path("fixtures/incident_diagnosable.yaml")
+    f2 = Path("fixtures/incident_inconclusive_missing_evidence.yaml")
+    shutil.copy(f1, tmp_path / "a_diagnosable.yaml")
+    shutil.copy(f2, tmp_path / "b_inconclusive.yaml")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["batch", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "| File | Status | Top Candidate | Score | Proposal |" in result.output
+    assert "a_diagnosable.yaml" in result.output
+    assert "b_inconclusive.yaml" in result.output
+    assert "DIAGNOSED" in result.output
+    assert "INCONCLUSIVE" in result.output
+
+
+def test_cli_batch_mode_validation_failure(tmp_path: Path):
+    f1 = Path("fixtures/incident_diagnosable.yaml")
+    shutil.copy(f1, tmp_path / "valid.yaml")
+    bad_file = tmp_path / "invalid.yaml"
+    bad_file.write_text("bad_content: true\n")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["batch", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "valid.yaml" in result.output
+    assert "invalid.yaml" in result.output
+    assert "VALIDATION_FAILED" in result.output
+
+
+def test_cli_analyze_output_dir(tmp_path: Path):
+    fixture_path = Path("fixtures/incident_diagnosable.yaml")
+    out_dir = tmp_path / "reports"
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["analyze", str(fixture_path), "--output-dir", str(out_dir)])
+    assert result.exit_code == 0
+
+    json_files = list(out_dir.glob("*.json"))
+    assert len(json_files) >= 1
+    saved_data = json.loads(json_files[0].read_text(encoding="utf-8"))
+    assert saved_data["incident_id"] == "inc-20261024-001"
+    assert saved_data["status"] == "DIAGNOSED"
+
+
+def test_cli_no_color_flag_and_env(tmp_path: Path, monkeypatch):
+    fixture_path = Path("fixtures/incident_diagnosable.yaml")
+    runner = CliRunner()
+
+    # With --no-color
+    res_flag = runner.invoke(main, ["analyze", str(fixture_path), "--no-color"])
+    assert res_flag.exit_code == 0
+    assert "\x1b[" not in res_flag.output
+
+    # With NO_COLOR env var
+    monkeypatch.setenv("NO_COLOR", "1")
+    res_env = runner.invoke(main, ["analyze", str(fixture_path)])
+    assert res_env.exit_code == 0
+    assert "\x1b[" not in res_env.output
